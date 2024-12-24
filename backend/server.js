@@ -16,6 +16,18 @@ app.use(cors());
 app.use(bodyParser.json());
 
 
+app.use((req, res, next) => {
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src 'self'; " +
+    "font-src 'self' data: http://54.146.215.18:3000; " +
+    "style-src 'self' 'unsafe-inline'; " +
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval'; " +
+    "img-src 'self' data: blob: http://54.146.215.18:3000"
+  );
+  next();
+});
+
 // const client = new Client({
 //   host: 'localhost',
 //   user: 'thanush',
@@ -963,7 +975,6 @@ app.get('/tanker', async (req, res) => {
   }
 });
 
-
 const createLabourColonyWasteTable = `
   CREATE TABLE IF NOT EXISTS labour_colony_waste (
     id SERIAL PRIMARY KEY,
@@ -999,16 +1010,16 @@ app.get('/labour-colony-waste', async (req, res) => {
 
     // Add date filter if provided
     if (date) {
-      conditions.push(`date = $${values.length + 1}`);
+      conditions.push(`date = ${values.length + 1}`);
       values.push(date);
     }
 
     // Add search filter if provided
     if (search) {
       conditions.push(`(
-        CAST(entry_no AS TEXT) ILIKE $${values.length + 1} OR 
-        storage_mode ILIKE $${values.length + 1} OR 
-        disposal_mode ILIKE $${values.length + 1}
+        CAST(entry_no AS TEXT) ILIKE ${values.length + 1} OR 
+        storage_mode ILIKE ${values.length + 1} OR 
+        disposal_mode ILIKE ${values.length + 1}
       )`);
       values.push(`%${search}%`);
     }
@@ -1063,7 +1074,7 @@ app.post('/labour-colony-waste', async (req, res) => {
     const query = `
       INSERT INTO labour_colony_waste 
       (entry_no, date, quantity_kg, storage_mode, disposal_mode)
-      VALUES ($1, $2, $3, $4, $5)
+      VALUES (\$1, \$2, \$3, \$4, $5)
       RETURNING *
     `;
 
@@ -1165,15 +1176,15 @@ app.delete('/labour-colony-waste/:id', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
-
-
 const createCDWasteTable = `
   CREATE TABLE IF NOT EXISTS cd_waste (
     id SERIAL PRIMARY KEY,
+    project_area NUMERIC(10,2) NOT NULL,
+    waste_amount NUMERIC(10,2) NOT NULL,
     date DATE NOT NULL,
-    quantity_kg NUMERIC(10,2) NOT NULL,
-    storage_mode VARCHAR(255) NOT NULL,
-    disposal_mode VARCHAR(255) NOT NULL,
+    waste_type VARCHAR(100),
+    disposal_method VARCHAR(100),
+    reuse_recycling_details TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
   )
 `;
@@ -1182,66 +1193,43 @@ client.query(createCDWasteTable)
   .then(() => console.log('C&D Waste table created or already exists.'))
   .catch(err => console.error('Error creating C&D waste table:', err));
 
-// Validation schema for C&D waste entries
+// Validation Schema
 const cdWasteSchema = Joi.object({
+  project_area: Joi.number().positive().required(),
+  waste_amount: Joi.number().positive(),
   date: Joi.date().required(),
-  quantity_kg: Joi.number().positive().required(),
-  storage_mode: Joi.string().required(),
-  disposal_mode: Joi.string().required()
+  waste_type: Joi.string(),
+  disposal_method: Joi.string(),
+  reuse_recycling_details: Joi.string()
 });
 
-// POST endpoint to add new C&D waste entry
-app.post('/cd-waste', async (req, res) => {
-  try {
-    const { error } = cdWasteSchema.validate(req.body);
-    if (error) {
-      return res.status(400).json({ error: error.details[0].message });
-    }
-
-    const { date, quantity_kg, storage_mode, disposal_mode } = req.body;
-
-    const query = `
-      INSERT INTO cd_waste 
-      (date, quantity_kg, storage_mode, disposal_mode)
-      VALUES ($1, $2, $3, $4)
-      RETURNING *
-    `;
-
-    const result = await client.query(query, [
-      date,
-      quantity_kg,
-      storage_mode,
-      disposal_mode
-    ]);
-
-    res.status(201).json({
-      message: 'C&D waste data added successfully!',
-      data: result.rows[0]
-    });
-
-  } catch (err) {
-    console.error('Error adding C&D waste data:', err);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// GET endpoint to retrieve C&D waste data
+// GET C&D Waste Data
 app.get('/cd-waste', async (req, res) => {
   try {
-    const { start_date, end_date } = req.query;
+    const { startDate, endDate, search } = req.query;
     let query = 'SELECT * FROM cd_waste';
     const params = [];
+    const conditions = [];
 
-    if (start_date || end_date) {
-      const conditions = [];
-      if (start_date) {
-        conditions.push(`date >= $${params.length + 1}`);
-        params.push(start_date);
-      }
-      if (end_date) {
-        conditions.push(`date <= $${params.length + 1}`);
-        params.push(end_date);
-      }
+    if (startDate) {
+      conditions.push(`date >= $${params.length + 1}`);
+      params.push(startDate);
+    }
+
+    if (endDate) {
+      conditions.push(`date <= $${params.length + 1}`);
+      params.push(endDate);
+    }
+
+    if (search) {
+      conditions.push(`
+        waste_type ILIKE $${params.length + 1} OR 
+        disposal_method ILIKE $${params.length + 1}
+      `);
+      params.push(`%${search}%`);
+    }
+
+    if (conditions.length > 0) {
       query += ' WHERE ' + conditions.join(' AND ');
     }
 
@@ -1260,44 +1248,246 @@ app.get('/cd-waste', async (req, res) => {
   }
 });
 
-// GET endpoint to retrieve C&D waste statistics
-app.get('/cd-waste/stats', async (req, res) => {
+// POST C&D Waste Data
+app.post('/cd-waste', async (req, res) => {
   try {
-    const { start_date, end_date } = req.query;
-    let query = `
-      SELECT 
-        COUNT(*) as total_entries,
-        SUM(quantity_kg) as total_quantity,
-        AVG(quantity_kg) as avg_quantity,
-        MIN(quantity_kg) as min_quantity,
-        MAX(quantity_kg) as max_quantity
-      FROM cd_waste
-    `;
-    
-    const params = [];
-    if (start_date || end_date) {
-      const conditions = [];
-      if (start_date) {
-        conditions.push(`date >= $${params.length + 1}`);
-        params.push(start_date);
-      }
-      if (end_date) {
-        conditions.push(`date <= $${params.length + 1}`);
-        params.push(end_date);
-      }
-      query += ' WHERE ' + conditions.join(' AND ');
+    const { error } = cdWasteSchema.validate(req.body);
+    if (error) {
+      return res.status(400).json({ error: error.details[0].message });
     }
 
-    const result = await client.query(query, params);
+    const {
+      project_area,
+      date,
+      waste_type,
+      disposal_method,
+      reuse_recycling_details
+    } = req.body;
 
-    res.status(200).json({
-      message: 'Statistics retrieved successfully',
+    // Calculate waste amount based on project area
+    // This is a simplified calculation - adjust according to your specific requirements
+    const waste_amount = project_area * 0.15; // Example: 150kg of waste per square meter
+
+    const query = `
+      INSERT INTO cd_waste 
+      (project_area, waste_amount, date, waste_type, disposal_method, reuse_recycling_details)
+      VALUES (\$1, \$2, \$3, \$4, \$5, $6)
+      RETURNING *
+    `;
+
+    const result = await client.query(query, [
+      project_area,
+      waste_amount,
+      date,
+      waste_type,
+      disposal_method,
+      reuse_recycling_details
+    ]);
+
+    res.status(201).json({
+      message: 'C&D Waste data added successfully',
       data: result.rows[0]
     });
 
   } catch (err) {
-    console.error('Error retrieving C&D waste statistics:', err);
+    console.error('Error adding C&D waste data:', err);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Calculate Waste Endpoint
+app.post('/cd-waste/calculate', async (req, res) => {
+  try {
+    const { project_area, startDate, endDate } = req.body;
+
+    if (!project_area || project_area <= 0) {
+      return res.status(400).json({ error: 'Invalid project area' });
+    }
+
+    // Calculate estimated waste
+    const waste_amount = await calculateWasteAmount(project_area);
+
+    // Store calculation in database
+    const query = `
+      INSERT INTO cd_waste (project_area, waste_amount, date)
+      VALUES (\$1, \$2, $3)
+      RETURNING *
+    `;
+
+    const result = await client.query(query, [
+      project_area,
+      waste_amount,
+      new Date()
+    ]);
+
+    res.status(200).json({
+      message: 'Waste calculation completed',
+      data: result.rows[0]
+    });
+
+  } catch (err) {
+    console.error('Error calculating waste:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Get Waste Statistics
+app.get('/cd-waste/statistics', async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    
+    const query = `
+      SELECT 
+        DATE_TRUNC('month', date) as month,
+        SUM(waste_amount) as total_waste,
+        AVG(waste_amount) as avg_waste,
+        COUNT(*) as total_entries
+      FROM cd_waste
+      WHERE ($1::date IS NULL OR date >= \$1)
+        AND ($2::date IS NULL OR date <= $2)
+      GROUP BY DATE_TRUNC('month', date)
+      ORDER BY month DESC
+    `;
+
+    const result = await client.query(query, [startDate, endDate]);
+
+    res.status(200).json({
+      message: 'Statistics retrieved successfully',
+      data: result.rows
+    });
+
+  } catch (err) {
+    console.error('Error retrieving statistics:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Helper function to calculate waste amount
+async function calculateWasteAmount(projectArea) {
+  // This is a simplified calculation
+  // You can implement more complex calculations based on your requirements
+  const baseWasteRate = 0.15; // 150kg per square meter
+  const wasteFactor = 1.2; // Additional factor for variables
+
+  return projectArea * baseWasteRate * wasteFactor;
+}
+
+// Update C&D Waste Data
+app.put('/cd-waste/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { error } = cdWasteSchema.validate(req.body);
+    
+    if (error) {
+      return res.status(400).json({ error: error.details[0].message });
+    }
+
+    const {
+      project_area,
+      waste_amount,
+      date,
+      waste_type,
+      disposal_method,
+      reuse_recycling_details
+    } = req.body;
+
+    const query = `
+      UPDATE cd_waste 
+      SET project_area = $1,
+          waste_amount = $2,
+          date = $3,
+          waste_type = $4,
+          disposal_method = $5,
+          reuse_recycling_details = $6
+      WHERE id = $7
+      RETURNING *
+    `;
+
+    const result = await client.query(query, [
+      project_area,
+      waste_amount,
+      date,
+      waste_type,
+      disposal_method,
+      reuse_recycling_details,
+      id
+    ]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Record not found' });
+    }
+
+    res.status(200).json({
+      message: 'C&D Waste data updated successfully',
+      data: result.rows[0]
+    });
+
+  } catch (err) {
+    console.error('Error updating C&D waste data:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Delete C&D Waste Data
+app.delete('/cd-waste/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const result = await client.query(
+      'DELETE FROM cd_waste WHERE id = $1 RETURNING *',
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Record not found' });
+    }
+
+    res.status(200).json({
+      message: 'C&D Waste data deleted successfully',
+      data: result.rows[0]
+    });
+
+  } catch (err) {
+    console.error('Error deleting C&D waste data:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.post('/add-waste', async (req, res) => {
+  try {
+    const { date, project_area, waste_estimation } = req.body;
+
+    const result = await client.query(
+      'INSERT INTO cd_waste (date, project_area, waste_estimation) VALUES (\$1, \$2, $3) RETURNING *',
+      [date, project_area, waste_estimation]
+    );
+
+    res.status(201).json({
+      message: 'Waste data added successfully',
+      data: result.rows[0],
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to add waste data' });
+  }
+});
+
+app.get('/get-waste', async (req, res) => {
+  try {
+    const { start_date, end_date } = req.query;
+
+    const result = await client.query(
+      'SELECT * FROM cd_waste WHERE date BETWEEN \$1 AND $2 ORDER BY date DESC',
+      [start_date, end_date]
+    );
+
+    res.status(200).json({
+      message: 'Waste data retrieved successfully',
+      data: result.rows,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to retrieve waste data' });
   }
 });
 
