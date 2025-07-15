@@ -1,16 +1,20 @@
 import 'package:flutter/material.dart';
-import 'login_page.dart';
-import 'main.dart';
 import 'home_page.dart';
+import 'auth_service.dart';
+import 'models.dart';
 
 class BlankPage extends StatelessWidget {
   final String message;
   final bool showBackButton;
+  final AuthService authService;
+  final User user;
 
   const BlankPage({
     Key? key, 
     this.message = 'Page Under Development', 
-    this.showBackButton = true
+    this.showBackButton = true,
+    required this.authService,
+    required this.user,
   }) : super(key: key);
 
   @override
@@ -31,7 +35,12 @@ class BlankPage extends StatelessWidget {
             icon: const Icon(Icons.home),
             onPressed: () => Navigator.pushReplacement(
               context,
-              MaterialPageRoute(builder: (context) => const MyHomePage()),
+              MaterialPageRoute(
+                builder: (context) => MyHomePage(
+                  user: user,
+                  authService: authService,
+                ),
+              ),
             ),
           ),
         ],
@@ -42,7 +51,7 @@ class BlankPage extends StatelessWidget {
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
             colors: [
-              const Color.fromARGB(255, 82, 159, 151), // Matching drawer gradient
+              const Color.fromARGB(255, 82, 159, 151),
               const Color.fromARGB(255, 52, 94, 89),
             ],
           ),

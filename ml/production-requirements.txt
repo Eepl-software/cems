@@ -1,0 +1,31 @@
+# Production Requirements for Enhanced OCR Service
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+pillow==10.1.0
+opencv-python==4.8.1.78
+pytesseract==0.3.10
+numpy==1.24.3
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+aiofiles==23.2.1
+
+# Security & Authentication
+pyjwt==2.8.0
+cryptography==41.0.7
+bcrypt==4.0.1
+
+# Monitoring & Logging
+prometheus-client==0.19.0
+structlog==23.2.0
+
+# Production utilities
+gunicorn==21.2.0
+httpx==0.25.2
+redis==5.0.1
+
+# Development & Testing (optional)
+pytest==7.4.3
+pytest-asyncio==0.21.1
+black==23.11.0
+flake8==6.1.0

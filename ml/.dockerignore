@@ -1,0 +1,55 @@
+# Git files
+.git
+.gitignore
+.gitattributes
+
+# Documentation
+*.md
+DEPLOYMENT_GUIDE.md
+TESTING_SUMMARY.md
+
+# Development files
+.vscode/
+.idea/
+*.pyc
+__pycache__/
+.pytest_cache/
+.coverage
+
+# Environment files
+.env.example
+.env.local
+.env.development
+
+# Test files
+test_*
+*_test.py
+tests/
+
+# Backup files
+*.backup
+*.bak
+*.tmp
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
+logs/
+
+# SSL certificates (will be mounted)
+ssl/
+
+# Monitoring data
+monitoring/grafana/data/
+monitoring/prometheus/data/
+
+# Docker files (except Dockerfile)
+docker-compose.yml
+docker-compose.*.yml
+
+# Deployment scripts
+deploy-*
+backup.sh

@@ -3572,3 +3572,299 @@ class _GroundWaterPageState extends State<GroundWaterPage> {
     );
   }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+import 'package:flutter/material.dart';
+import 'dart:async';
+import 'dart:io';
+import 'package:path_provider/path_provider.dart';
+import 'package:csv/csv.dart';
+
+class RainWaterPage extends StatefulWidget {
+  const RainWaterPage({Key? key}) : super(key: key);
+
+  @override
+  RainWaterPageState createState() => RainWaterPageState();
+}
+
+class RainWaterPageState extends State<RainWaterPage> with SingleTickerProviderStateMixin {
+  late TabController _tabController;
+  String _searchQuery = '';
+  bool _isDarkTheme = false;
+  String _selectedStatus = 'All';
+
+  final List<Map<String, dynamic>> _harvestingData = [
+    {
+      'title': 'Collection Pit 1',
+      'capacity': '5000L',
+      'status': 'Active',
+      'lastInspected': '2023-12-01',
+      'details': 'Main collection point near Block A'
+    },
+    {
+      'title': 'Storage Tank 1',
+      'capacity': '10000L',
+      'status': 'Active',
+      'lastInspected': '2023-12-05',
+      'details': 'Underground storage tank'
+    },
+    {
+      'title': 'Filter System',
+      'capacity': 'N/A',
+      'status': 'Maintenance',
+      'lastInspected': '2023-11-28',
+      'details': 'Primary filtration system'
+    },
+  ];
+
+  final List<Map<String, String>> _monthlyData = [
+    {
+      'month': 'January 2024',
+      'rainfall': '45mm',
+      'collected': '35000L',
+      'efficiency': '78%'
+    },
+    {
+      'month': 'December 2023',
+      'rainfall': '62mm',
+      'collected': '48000L',
+      'efficiency': '82%'
+    },
+    {
+      'month': 'November 2023',
+      'rainfall': '85mm',
+      'collected': '65000L',
+      'efficiency': '85%'
+    }
+  ];
+
+  List<Map<String, dynamic>> get _filteredHarvestingData {
+    return _harvestingData
+        .where((data) =>
+            (data['title'].toLowerCase().contains(_searchQuery.toLowerCase()) ||
+            data['status'].toLowerCase().contains(_searchQuery.toLowerCase())) &&
+            (_selectedStatus == 'All' || data['status'] == _selectedStatus))
+        .toList();
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _tabController = TabController(length: 3, vsync: this);
+  }
+
+  @override
+  void dispose() {
+    _tabController.dispose();
+    super.dispose();
+  }
+
+  void _toggleTheme() {
+    setState(() {
+      _isDarkTheme = !_isDarkTheme;
+    });
+  }
+
+  void _exportData() async {
+    List<List<String>> csvData = [
+      ['Month', 'Rainfall', 'Water Collected', 'Efficiency'],
+      ..._monthlyData.map((item) => [
+            item['month']!,
+            item['rainfall']!,
+            item['collected']!,
+            item['efficiency']!,
+          ])
+    ];
+
+    String csv = const ListToCsvConverter().convert(csvData);
+    final directory = await getApplicationDocumentsDirectory();
+    final path = "${directory.path}/HarvestingData.csv";
+    File(path).writeAsString(csv);
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Data exported to $path')),
+    );
+  }
+
+  Widget _buildStatCard(String title, String value, IconData icon) {
+    return Card(
+      elevation: 4,
+      color: Colors.blue[800],
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, color: Colors.white, size: 36),
+            const SizedBox(height: 8),
+            Text(value, style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 4),
+            Text(title, style: const TextStyle(color: Colors.white70, fontSize: 16)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildOverviewTab() {
+    return GridView.count(
+      crossAxisCount: 2,
+      padding: const EdgeInsets.all(16),
+      children: [
+        _buildStatCard('Total Collected', '65000L', Icons.water_drop),
+        _buildStatCard('Average Efficiency', '85%', Icons.bar_chart),
+      ],
+    );
+  }
+
+  Widget _buildMonthlyDataTab() {
+    return ListView.builder(
+      padding: const EdgeInsets.all(16),
+      itemCount: _monthlyData.length,
+      itemBuilder: (context, index) {
+        final data = _monthlyData[index];
+        return Card(
+          elevation: 4,
+          margin: const EdgeInsets.only(bottom: 16),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  data['month']!,
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const Divider(),
+                _buildDetailRow('Rainfall', data['rainfall']!),
+                _buildDetailRow('Water Collected', data['collected']!),
+                _buildDetailRow('Collection Efficiency', data['efficiency']!),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildAnalyticsTab() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Text(
+            'Analytics Coming Soon',
+            style: const TextStyle(fontSize: 20),
+          ),
+          const SizedBox(height: 16),
+          ElevatedButton(
+            onPressed: _exportData,
+            child: const Text('Export Data'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDetailRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(
+            label,
+            style: TextStyle(
+              color: Colors.grey[600],
+              fontSize: 16,
+            ),
+          ),
+          Text(
+            value,
+            style: const TextStyle(
+              fontWeight: FontWeight.bold,
+              fontSize: 16,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      theme: _isDarkTheme ? ThemeData.dark() : ThemeData.light(),
+      home: Scaffold(
+        appBar: AppBar(
+          title: const Text('Rain Water Harvesting'),
+          backgroundColor: Colors.blue[800],
+          actions: [
+            IconButton(
+              icon: Icon(_isDarkTheme ? Icons.dark_mode : Icons.light_mode),
+              onPressed: _toggleTheme,
+            ),
+          ],
+          bottom: TabBar(
+            controller: _tabController,
+            tabs: const [
+              Tab(text: 'Overview', icon: Icon(Icons.info)),
+              Tab(text: 'Monthly Data', icon: Icon(Icons.calendar_month)),
+              Tab(text: 'Analytics', icon: Icon(Icons.analytics)),
+            ],
+          ),
+        ),
+        floatingActionButton: FloatingActionButton(
+          backgroundColor: Colors.blue[800],
+          onPressed: _exportData,
+          child: const Icon(Icons.download),
+        ),
+        body: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: DropdownButton<String>(
+                value: _selectedStatus,
+                onChanged: (value) => setState(() => _selectedStatus = value ?? 'All'),
+                items: const [
+                  DropdownMenuItem(value: 'All', child: Text('All')),
+                  DropdownMenuItem(value: 'Active', child: Text('Active')),
+                  DropdownMenuItem(value: 'Maintenance', child: Text('Maintenance')),
+                ],
+              ),
+            ),
+            Expanded(
+              child: TabBarView(
+                controller: _tabController,
+                children: [
+                  _buildOverviewTab(),
+                  _buildMonthlyDataTab(),
+                  _buildAnalyticsTab(),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

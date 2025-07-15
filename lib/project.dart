@@ -110,7 +110,7 @@ class _ProjectsPageState extends State<ProjectsPage> {
                   if (index == 0) {
                     Navigator.push(
                       context,
-                      MaterialPageRoute(builder: (context) => const ApprovalsPage()),
+                      MaterialPageRoute(builder: (context) => const EnhancedApprovalsPage()),
                     );
                   }
                 },

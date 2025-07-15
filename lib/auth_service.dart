@@ -1,13 +1,24 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import 'models/login_response.dart';
+import 'models.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class AuthService {
   static const String baseUrl = 'http://54.146.215.18:3000';
+  User? _currentUser;
+  String? _token;
+
+  // Getter for current user
+  User? get currentUser => _currentUser;
+  
+  // Getter for token
+  String? get token => _token;
 
   Future<LoginResponse> login(String username, String password) async {
     try {
       final response = await http.post(
-        Uri.parse('$baseUrl/login'),
+        Uri.http('54.146.215.18:3000', '/login'),
         headers: {'Content-Type': 'application/json'},
         body: json.encode({
           'username': username,
@@ -15,46 +26,48 @@ class AuthService {
         }),
       );
 
-      // Check if the response is JSON
-      String contentType = response.headers['content-type'] ?? '';
-      if (!contentType.contains('application/json')) {
-        throw AuthException(
-          'Server error: Expected JSON response but received different format. Please try again later.',
-        );
-      }
+      final data = json.decode(response.body);
 
-      // Try to parse the response body
-      Map<String, dynamic> bodyMap;
-      try {
-        bodyMap = json.decode(response.body);
-      } catch (e) {
-        throw AuthException(
-          'Failed to parse server response. Please try again later.',
-        );
-      }
-
-      // Handle different status codes
-      switch (response.statusCode) {
-        case 200:
-          return LoginResponse.fromJson(bodyMap);
-        case 401:
-          throw AuthException(bodyMap['error'] ?? 'Invalid credentials');
-        case 404:
-          throw AuthException('Server endpoint not found');
-        case 500:
-          throw AuthException('Internal server error');
-        default:
-          throw AuthException(
-            bodyMap['error'] ?? 'An unexpected error occurred',
+      if (response.statusCode == 200) {
+        _token = data['token'];
+        
+        if (data['user'] != null) {
+          _currentUser = User(
+            id: data['user']['id'] ?? 1,
+            username: data['user']['username'] ?? username,
+            email: data['user']['email'] ?? '',
+            phone: data['user']['phone'] ?? '',
+            company: data['user']['company'] ?? '',
+            designation: data['user']['designation'] ?? 'user',
+            role: data['user']['designation']?.toString().toLowerCase() == 'admin' 
+                ? UserRole.superuser 
+                : UserRole.user,
           );
+        }
+
+        return LoginResponse(
+          success: true,
+          token: data['token'],
+          message: data['message'] ?? 'Login successful',
+          user: data['user'],
+        );
+      } else {
+        return LoginResponse(
+          success: false,
+          message: data['error'] ?? 'Login failed',
+        );
       }
-    } on http.ClientException catch (e) {
-      throw AuthException('Connection error: Please check your internet connection');
     } catch (e) {
-      if (e is AuthException) rethrow;
-      throw AuthException('An unexpected error occurred: ${e.toString()}');
+      return LoginResponse(
+        success: false,
+        message: e.toString(),
+      );
     }
   }
+Future<void> saveCredentialsForBiometric(String username) async {
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.setString('last_username', username);
+}
 
   Future<RegistrationResponse> register({
     required String username,
@@ -66,7 +79,7 @@ class AuthService {
   }) async {
     try {
       final response = await http.post(
-        Uri.parse('$baseUrl/register'),
+        Uri.http('54.146.215.18:3000', '/register'),
         headers: {'Content-Type': 'application/json'},
         body: json.encode({
           'username': username,
@@ -96,7 +109,9 @@ class AuthService {
 
       switch (response.statusCode) {
         case 201:
-          return RegistrationResponse.fromJson(bodyMap);
+          final registrationResponse = RegistrationResponse.fromJson(bodyMap);
+          _currentUser = registrationResponse.user;
+          return registrationResponse;
         case 400:
           throw AuthException(bodyMap['error'] ?? 'Invalid registration data');
         case 409:
@@ -115,6 +130,42 @@ class AuthService {
       throw AuthException('An unexpected error occurred: ${e.toString()}');
     }
   }
+
+  // Check if user is super user
+  bool isSuperUser() {
+    return _currentUser?.designation.toLowerCase() == 'admin' ||
+           _currentUser?.designation.toLowerCase() == 'superuser';
+  }
+
+  // Check if user is authenticated
+  bool get isAuthenticated => _token != null;
+
+  // Logout method
+  void logout() {
+    _currentUser = null;
+    _token = null;
+  }
+}
+
+
+
+
+// Check if biometric login is enabled
+Future<bool> isBiometricLoginEnabled() async {
+  final prefs = await SharedPreferences.getInstance();
+  return prefs.getBool('biometric_enabled') ?? false;
+}
+
+// Get saved username for biometric login
+Future<String?> getSavedUsername() async {
+  final prefs = await SharedPreferences.getInstance();
+  return prefs.getString('last_username');
+}
+
+// Enable or disable biometric login
+Future<void> setBiometricLogin(bool enabled) async {
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.setBool('biometric_enabled', enabled);
 }
 
 class AuthException implements Exception {
@@ -125,33 +176,9 @@ class AuthException implements Exception {
   String toString() => message;
 }
 
-class LoginResponse {
-  final String message;
-  final UserModel user;
-  final String? token;
-
-  LoginResponse({
-    required this.message,
-    required this.user,
-    this.token,
-  });
-
-  factory LoginResponse.fromJson(Map<String, dynamic> json) {
-    try {
-      return LoginResponse(
-        message: json['message'] ?? '',
-        user: UserModel.fromJson(json['user'] ?? {}),
-        token: json['token'],
-      );
-    } catch (e) {
-      throw AuthException('Invalid response format from server');
-    }
-  }
-}
-
 class RegistrationResponse {
   final String message;
-  final UserModel user;
+  final User user;
 
   RegistrationResponse({
     required this.message,
@@ -162,50 +189,20 @@ class RegistrationResponse {
     try {
       return RegistrationResponse(
         message: json['message'] ?? '',
-        user: UserModel.fromJson(json['user'] ?? {}),
+        user: User(
+          id: json['user']['id'] ?? -1,
+          username: json['user']['username'] ?? '',
+          email: json['user']['email'] ?? '',
+          phone: json['user']['phone'] ?? '',
+          company: json['user']['company'] ?? '',
+          designation: json['user']['designation'] ?? '',
+          role: json['user']['designation']?.toString().toLowerCase() == 'admin' 
+              ? UserRole.superuser 
+              : UserRole.user,
+        ),
       );
     } catch (e) {
       throw AuthException('Invalid response format from server');
     }
-  }
-}
-
-class UserModel {
-  final int id;
-  final String username;
-  final String email;
-  final String phone;
-  final String company;
-  final String designation;
-
-  UserModel({
-    required this.id,
-    required this.username,
-    required this.email,
-    required this.phone,
-    required this.company,
-    required this.designation,
-  });
-
-  factory UserModel.fromJson(Map<String, dynamic> json) {
-    return UserModel(
-      id: json['id'] ?? -1,
-      username: json['username'] ?? '',
-      email: json['email'] ?? '',
-      phone: json['phone'] ?? '',
-      company: json['company'] ?? '',
-      designation: json['designation'] ?? '',
-    );
-  }
-
-  Map<String, dynamic> toJson() {
-    return {
-      'id': id,
-      'username': username,
-      'email': email,
-      'phone': phone,
-      'company': company,
-      'designation': designation,
-    };
   }
 }
