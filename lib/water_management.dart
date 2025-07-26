@@ -5,11 +5,11 @@ import 'dart:async';
 import 'package:intl/intl.dart';
 import 'package:fl_chart/fl_chart.dart';
 // Add these missing imports for navigation
-import 'package:namer_app/auth_service.dart';
+import 'login/auth_service.dart';
 import 'tanker_page.dart';
-import 'BorewellPage.dart';
-import 'ConsumptionPage.dart';
-import 'BWSSBPage.dart';
+import 'water/BorewellPage.dart';
+import 'water/ConsumptionPage.dart';
+import 'water/BWSSBPage.dart';
 import 'LabourColonyWastePage.dart';
 import 'login/login_page.dart';
 

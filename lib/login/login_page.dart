@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
-import 'package:namer_app/admin/biometric_auth_page.dart';
-import 'package:namer_app/services/admin_service.dart';
+import 'package:prestige_park_groove/admin/biometric_auth_page.dart';
+import 'package:prestige_park_groove/services/admin_service.dart';
 import 'package:url_launcher/url_launcher.dart';
-import '../auth_service.dart';
+import 'auth_service.dart';
 import '../registration/registration_page.dart';
 import 'dart:math' as math;
 import '../home_page.dart';
@@ -449,7 +449,7 @@ class _EnhancedLoginPageState extends State<EnhancedLoginPage>
                           color: _isAdminLogin ? Colors.red.shade50 : Colors.teal.shade50,
                         ),
                         child: Image.asset(
-                          'assets/Kalpar logo.png',
+                          'assets/Prestige.jpeg',
                           height: 60,
                           fit: BoxFit.contain,
                           errorBuilder: (context, error, stackTrace) {
@@ -478,12 +478,12 @@ class _EnhancedLoginPageState extends State<EnhancedLoginPage>
                       _buildLogoButton(
                         'assets/L&T.png',
                         'https://www.iisc.ac.in',
-                        'Clean Technologies',
+                        'L&T',
                       ),
                       _buildLogoButton(
                         'assets/IISC_logo.jpeg',
                         'https://www.larsentoubro.com',
-                        'Foxconn',
+                        'IISC',
                       ),
                     ],
                   ),

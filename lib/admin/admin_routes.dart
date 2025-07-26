@@ -1,6 +1,6 @@
 // admin_routes.dart
 import 'package:flutter/material.dart';
-import 'package:namer_app/services/admin_service.dart';
+import 'package:prestige_park_groove/services/admin_service.dart';
 
 class AdminRoutes {
   static const String dashboard = '/admin/dashboard';

@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
-import 'enhanced_water_dashboard.dart';
+import 'water/enhanced_water_dashboard.dart';
 import 'widgets/enhanced_water_consumption_widget.dart';
-import 'auth_service.dart';
+import 'login/auth_service.dart';
 
 /// Example showing how to integrate the enhanced water dashboard
 /// Replace your existing water management page with this implementation

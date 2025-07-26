@@ -7,8 +7,8 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:open_file/open_file.dart';
 import 'package:excel/excel.dart' as xl;
-import 'package:namer_app/login/login_page.dart';
-import 'package:namer_app/auth_service.dart';
+import 'package:prestige_park_groove/login/login_page.dart';
+import 'package:prestige_park_groove/login/auth_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'cross_platform_pdf_viewer.dart'; 
 import './utils/platform_utils.dart'; 
@@ -352,7 +352,7 @@ class _EnhancedApprovalsPageState extends State<EnhancedApprovalsPage>
     setState(() => _isLoading = true);
     try {
       final response = await http.get(
-        Uri.parse(' baseUrl/api/documents'),
+        Uri.parse('$baseUrl/api/documents'),
         headers: {'Authorization': 'Bearer ${await _getToken()}'},
       );
       if (response.statusCode == 200) {
@@ -1636,7 +1636,7 @@ class _EnhancedApprovalsPageState extends State<EnhancedApprovalsPage>
       final prefs = await SharedPreferences.getInstance();
       final token = prefs.getString('auth_token');
       final response = await http.delete(
-        Uri.parse(' baseUrl/api/enhanced-documents/${document.id}'),
+        Uri.parse('$baseUrl/api/documents/${document.id}'),
         headers: {'Authorization': 'Bearer $token'},
       );
       if (response.statusCode == 200) {
@@ -1670,6 +1670,11 @@ class _EnhancedApprovalsPageState extends State<EnhancedApprovalsPage>
 
   Future<void> _openDocument(EnhancedProjectDocument document) async {
     try {
+      print('Opening document: ${document.name}');
+      print('Document ID: ${document.id}');
+      print('Is Asset: ${document.isAsset}');
+      print('File Path: ${document.filePath}');
+      
       if (document.isAsset) {
         Navigator.push(
           context,
@@ -1682,10 +1687,50 @@ class _EnhancedApprovalsPageState extends State<EnhancedApprovalsPage>
           ),
         );
       } else {
-        // For user-uploaded documents, handle differently
+        // For user-uploaded documents, get download URL
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Opening document...')),
         );
+        
+        final prefs = await SharedPreferences.getInstance();
+        final token = prefs.getString('auth_token');
+        if (token == null) {
+          throw Exception('Authentication token not found');
+        }
+        
+        print('Making API call to: $baseUrl/api/documents/${document.id}/download');
+        
+        final response = await http.get(
+          Uri.parse('$baseUrl/api/documents/${document.id}/download'),
+          headers: {'Authorization': 'Bearer $token'},
+        );
+        
+        print('API Response Status: ${response.statusCode}');
+        print('API Response Body: ${response.body}');
+        
+        if (response.statusCode == 200) {
+          final data = json.decode(response.body);
+          if (data['success'] == true && data['downloadUrl'] != null) {
+            // Use the download URL to open/download the document
+            final url = data['downloadUrl'];
+            print('Got download URL: $url');
+            
+            Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (context) => CrossPlatformPDFViewer(
+                  filePath: url,
+                  title: document.name,
+                  isAsset: false,
+                ),
+              ),
+            );
+          } else {
+            throw Exception('Failed to get document download URL');
+          }
+        } else {
+          throw Exception('Failed to access document: ${response.statusCode}');
+        }
       }
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -3307,30 +3352,76 @@ class _EnhancedDocumentFormState extends State<EnhancedDocumentForm>
         throw Exception('Authentication token not found');
       }
       final request = http.MultipartRequest(
-        'POST',
-        Uri.parse(' baseUrl/api/documents'),
+        widget.document == null ? 'POST' : 'PUT',
+        Uri.parse(widget.document == null 
+          ? '$baseUrl/api/documents' 
+          : '$baseUrl/api/documents/${widget.document!.id}'),
       );
       request.headers['Authorization'] = 'Bearer $token';
-      // ... add fields and file as before ...
-      // (rest of the upload logic remains unchanged)
+      
+      // Add required fields
+      request.fields['name'] = _nameController.text;
+      request.fields['category'] = _selectedCategory;
+      request.fields['status'] = _selectedStatus;
+      
+      print('Upload Debug - Name: ${_nameController.text}');
+      print('Upload Debug - Category: $_selectedCategory');
+      print('Upload Debug - Status: $_selectedStatus');
+      print('Upload Debug - Description: ${_descriptionController.text}');
+      print('Upload Debug - Tags (raw): ${_tagsController.text}');
+      if (_tagsController.text.isNotEmpty) {
+        List<String> tagsList = _tagsController.text.split(',').map((tag) => tag.trim()).where((tag) => tag.isNotEmpty).toList();
+        print('Upload Debug - Tags (array): ${json.encode(tagsList)}');
+      }
+      print('Upload Debug - File: ${_selectedFile?.path}');
+      
+      // Add optional fields
+      if (_descriptionController.text.isNotEmpty) {
+        request.fields['description'] = _descriptionController.text;
+      }
+      if (_tagsController.text.isNotEmpty) {
+        // Convert comma-separated string to JSON array
+        List<String> tagsList = _tagsController.text.split(',').map((tag) => tag.trim()).where((tag) => tag.isNotEmpty).toList();
+        request.fields['tags'] = json.encode(tagsList);
+      }
+      
+      // Add file if selected
+      if (_selectedFile != null) {
+        request.files.add(await http.MultipartFile.fromPath('file', _selectedFile!.path));
+      }
+      
       final response = await request.send();
       final responseBody = await response.stream.bytesToString();
+      
+      print('Upload Response Status: ${response.statusCode}');
+      print('Upload Response Body: $responseBody');
+      
       if (response.statusCode == 201 || response.statusCode == 200) {
-        _showSuccess(widget.document == null 
-            ? 'Document saved successfully!' 
-            : 'Document updated successfully!');
-        if (widget.onDocumentSaved != null) {
-          widget.onDocumentSaved!();
+        if (mounted) {
+          _showSuccess(widget.document == null 
+              ? 'Document saved successfully!' 
+              : 'Document updated successfully!');
+          if (widget.onDocumentSaved != null) {
+            widget.onDocumentSaved!();
+          }
+          Navigator.of(context).pop();
         }
-        Navigator.of(context).pop();
       } else {
-        final errorData = json.decode(responseBody);
-        throw Exception(errorData['message'] ?? 'Failed to save document');
+        try {
+          final errorData = json.decode(responseBody);
+          throw Exception(errorData['message'] ?? 'Failed to save document');
+        } catch (jsonError) {
+          print('JSON Parse Error: $jsonError');
+          print('Raw Response: $responseBody');
+          throw Exception('Server returned invalid response. Status: ${response.statusCode}, Body: ${responseBody.length > 200 ? responseBody.substring(0, 200) + "..." : responseBody}');
+        }
       }
     } catch (e) {
       _showError('Error saving document: $e');
     } finally {
-      setState(() => _isLoading = false);
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
     }
   }
 

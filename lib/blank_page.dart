@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'home_page.dart';
-import 'auth_service.dart';
+import 'login/auth_service.dart';
 import 'models.dart';
 
 class BlankPage extends StatelessWidget {

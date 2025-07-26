@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:http/http.dart' as http;
-import '../auth_service.dart';
+import '../login/auth_service.dart';
 
 /// Centralized API service for all backend communications
 class CentralizedApiService {
@@ -36,7 +36,18 @@ class CentralizedApiService {
     }
 
     // Fix URL construction to avoid null character issue
-    Uri uri = Uri.http('54.146.215.18:3000', endpoint, queryParams);
+    final cleanEndpoint = endpoint.replaceAll('\x00', '').trim();
+    Uri uri;
+    try {
+      uri = Uri.http('54.146.215.18:3000', cleanEndpoint, queryParams);
+    } catch (e) {
+      // Fallback URL construction
+      final String baseUrlClean = baseUrl.replaceAll('\x00', '').trim();
+      final String fullUrl = queryParams == null || queryParams.isEmpty
+          ? '$baseUrlClean$cleanEndpoint'
+          : '$baseUrlClean$cleanEndpoint?${Uri(queryParameters: queryParams).query}';
+      uri = Uri.parse(fullUrl);
+    }
 
     final headers = _headers;
 
@@ -103,7 +114,21 @@ class CentralizedApiService {
     Map<String, String> fields, {
     String fileFieldName = 'file',
   }) async {
-    final request = http.MultipartRequest('POST', Uri.http('54.146.215.18:3000', endpoint));
+    // Clean endpoint to avoid null characters
+    final cleanEndpoint = endpoint.replaceAll('\x00', '').trim();
+    print('Original endpoint: $endpoint');
+    print('Clean endpoint: $cleanEndpoint');
+    
+    Uri uri;
+    try {
+      uri = Uri.http('54.146.215.18:3000', cleanEndpoint);
+    } catch (e) {
+      print('URI construction failed: $e');
+      // Fallback construction
+      uri = Uri.parse('http://54.146.215.18:3000$cleanEndpoint');
+    }
+    print('Final URI: $uri');
+    final request = http.MultipartRequest('POST', uri);
     
     if (_authService.token != null) {
       request.headers['Authorization'] = 'Bearer ${_authService.token}';
@@ -364,6 +389,7 @@ class CentralizedApiService {
       if (status != null) 'status': status,
       if (search != null) 'search': search,
     };
+    
 
     return await _makeRequest(
       'GET',

@@ -2,7 +2,7 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
 
-import 'package:namer_app/services/admin_service.dart' as admin_service;
+import 'package:prestige_park_groove/services/admin_service.dart' as admin_service;
 
 class AdminUserDetailPage extends StatefulWidget {
   final AdminUser? user;

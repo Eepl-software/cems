@@ -1,14 +1,14 @@
 import 'package:flutter/material.dart';
-import 'package:namer_app/models.dart';
-import 'package:namer_app/admin/superuser_alert_page.dart';
+import 'package:prestige_park_groove/models.dart';
+import 'package:prestige_park_groove/admin/superuser_alert_page.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:namer_app/auth_service.dart';
+import 'package:prestige_park_groove/login/auth_service.dart';
 import 'main.dart';
 import 'login/login_page.dart';
 import 'airpollution/airpollution.dart';
 import 'rain_water.dart';
 import 'solid_waste.dart';
-import 'ground_water.dart';
+import 'ground_water/ground_water.dart';
 import 'water_management.dart';
 import 'models.dart';
 import 'admin/user_management_page.dart';
@@ -21,7 +21,15 @@ import 'admin/password_settings_page.dart';
 import 'admin/biometric_settings_page.dart';
 import 'admin/two_factor_authentication_page.dart';
 import 'macos_pdf_viewer.dart';
-import 'cement.dart';
+import 'cement/cement.dart';
+import 'sand/sand.dart';
+import 'metals/metals.dart';
+import 'pipes/pipes.dart';
+import 'tiles/tiles.dart';
+import 'wood/wood.dart';
+import 'electricals/electricals.dart';
+import 'plastic/plastic.dart';
+import 'aggregates/aggregates.dart';
 
 class MyHomePage extends StatelessWidget {
   final User user;
@@ -49,10 +57,29 @@ class MyHomePage extends StatelessWidget {
   Widget _buildPartnerLogo(String assetPath, String url) {
     return GestureDetector(
       onTap: () => _openWebsite(url),
-      child: Image.asset(
-        assetPath,
-        width: 100,
-        height: 100,
+      child: Container(
+        width: 80,
+        height: 80,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(8),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.grey.withOpacity(0.3),
+              spreadRadius: 1,
+              blurRadius: 3,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: Image.asset(
+            assetPath,
+            width: 80,
+            height: 80,
+            fit: BoxFit.contain,
+          ),
+        ),
       ),
     );
   }
@@ -207,20 +234,26 @@ class MyHomePage extends StatelessWidget {
                         ),
                       ),
                       const SizedBox(height: 16),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                      Wrap(
+                        alignment: WrapAlignment.spaceEvenly,
+                        spacing: 16,
+                        runSpacing: 16,
                         children: [
+                          _buildPartnerLogo(
+                            'assets/Kalpar logo.png',
+                            'https://g.co/kgs/qUjubQb',
+                          ),
                           _buildPartnerLogo(
                             'assets/IISC_logo.jpeg',
                             'https://www.iisc.ac.in/',
                           ),
                           _buildPartnerLogo(
                             'assets/L&T.png',
-                            'https://www.iisc.ac.in/',
+                            'https://www.larsentoubro.com/',
                           ),
                           _buildPartnerLogo(
-                            'assets/Kalpar logo.png',
-                            'https://g.co/kgs/qUjubQb',
+                            'assets/Prestige.jpeg',
+                            'https://www.prestigeconstructions.com/',
                           ),
                         ],
                       ),
@@ -425,7 +458,7 @@ class _CustomDrawerState extends State<CustomDrawer> with SingleTickerProviderSt
                     radius: 40,
                     backgroundColor: Colors.white,
                     child: Image.asset(
-                      'assets/FoxCon Logo.png',
+                      'assets/L&T.png',
                       fit: BoxFit.contain,
                     ),
                   ),
@@ -785,6 +818,70 @@ List<Widget> _buildAdminItems() {
         onTap: () {
           Navigator.pop(context);
           _navigateWithAnimation(const CementPage());
+        },
+      ),
+      _buildSubDrawerItem(
+        title: 'Sand Management',
+        icon: Icons.agriculture_rounded,
+        onTap: () {
+          Navigator.pop(context);
+          _navigateWithAnimation(const SandPage());
+        },
+      ),
+      _buildSubDrawerItem(
+        title: 'Metals Management',
+        icon: Icons.construction_rounded,
+        onTap: () {
+          Navigator.pop(context);
+          _navigateWithAnimation(const MetalsPage());
+        },
+      ),
+      _buildSubDrawerItem(
+        title: 'Pipes Management',
+        icon: Icons.plumbing_rounded,
+        onTap: () {
+          Navigator.pop(context);
+          _navigateWithAnimation(const PipesPage());
+        },
+      ),
+      _buildSubDrawerItem(
+        title: 'Tiles Management',
+        icon: Icons.grid_view_rounded,
+        onTap: () {
+          Navigator.pop(context);
+          _navigateWithAnimation(const TilesPage());
+        },
+      ),
+      _buildSubDrawerItem(
+        title: 'Wood Management',
+        icon: Icons.park_rounded,
+        onTap: () {
+          Navigator.pop(context);
+          _navigateWithAnimation(const WoodPage());
+        },
+      ),
+      _buildSubDrawerItem(
+        title: 'Electricals Management',
+        icon: Icons.electrical_services_rounded,
+        onTap: () {
+          Navigator.pop(context);
+          _navigateWithAnimation(const ElectricalsPage());
+        },
+      ),
+      _buildSubDrawerItem(
+        title: 'Plastic Management',
+        icon: Icons.recycling_rounded,
+        onTap: () {
+          Navigator.pop(context);
+          _navigateWithAnimation(const PlasticPage());
+        },
+      ),
+      _buildSubDrawerItem(
+        title: 'Aggregates Management',
+        icon: Icons.grain_rounded,
+        onTap: () {
+          Navigator.pop(context);
+          _navigateWithAnimation(const AggregatesPage());
         },
       ),
     ];

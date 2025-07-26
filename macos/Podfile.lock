@@ -81,7 +81,7 @@ SPEC CHECKSUMS:
   file_picker: 7584aae6fa07a041af2b36a2655122d42f578c1a
   file_selector_macos: 6280b52b459ae6c590af5d78fc35c7267a3c4b31
   flutter_image_compress_macos: e68daf54bb4bf2144c580fd4d151c949cbf492f0
-  flutter_local_notifications: 453432cd6399a07d072885bc7828fb2307868856
+  flutter_local_notifications: 7e5a17a1dbc00d83dc10d43c2c4c05f2ceed233c
   FlutterMacOS: 8f6f14fa908a6fb3fba0cd85dbd81ec4b251fb24
   geolocator_apple: ccfb79d5250de3a295f5093cd03e76aa8836a416
   open_file_mac: 01874b6d6a2c1485ac9b126d7105b99102dea2cf

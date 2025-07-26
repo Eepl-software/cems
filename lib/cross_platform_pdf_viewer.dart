@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:pdfx/pdfx.dart';
 import 'package:flutter_speed_dial/flutter_speed_dial.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:http/http.dart' as http;
 import 'dart:io';
 import './utils/platform_utils.dart';
 
@@ -76,6 +77,15 @@ class _CrossPlatformPDFViewerState extends State<CrossPlatformPDFViewer> {
       if (widget.isAsset) {
         // Load from assets (works on all platforms)
         document = await PdfDocument.openAsset(widget.filePath);
+      } else if (widget.filePath.startsWith('http://') || widget.filePath.startsWith('https://')) {
+        // Load from URL (S3 or web URL)
+        print('Loading PDF from URL: ${widget.filePath}');
+        final response = await http.get(Uri.parse(widget.filePath));
+        if (response.statusCode == 200) {
+          document = await PdfDocument.openData(response.bodyBytes);
+        } else {
+          throw Exception('Failed to load PDF from URL: ${response.statusCode}');
+        }
       } else {
         // Load from file path
         if (PlatformUtils.isWeb) {

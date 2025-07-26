@@ -6,10 +6,10 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:percent_indicator/percent_indicator.dart';
 import 'package:animated_text_kit/animated_text_kit.dart';
 import 'LabourColonyWastePage.dart';
-import 'CDWasteDetailsPage.dart';
+import 'cnd/CDWasteDetailsPage.dart';
 import 'ProjectWastePage.dart';
 import 'MunicipalSolidWasteDetailsPage.dart';
-import 'ConstructionPhaseWastePage.dart'; 
+import 'utils/ConstructionPhaseWastePage.dart'; 
 
 class SolidWastePage extends StatefulWidget {
   const SolidWastePage({super.key});

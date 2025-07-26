@@ -4,8 +4,8 @@ import 'dart:convert';
 import 'package:intl/intl.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:namer_app/auth_service.dart';
-import 'package:namer_app/services/image_classifier.dart';
+import 'login/auth_service.dart';
+import 'services/image_classifier.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'dart:io';
 import 'package:path_provider/path_provider.dart';
@@ -35,6 +35,10 @@ class TankerDataScreenState extends State<TankerDataScreen> {
   DateTime? _selectedDate;
   String? _error;
   File? _selectedImage;
+  
+  // Sorting variables
+  int _sortColumnIndex = 4; // Default sort by date column
+  bool _sortAscending = false; // Newest first
 
   // Predefined tanker capacities based on registration numbers
   final Map<String, double> _tankerCapacities = {
@@ -150,7 +154,16 @@ class TankerDataScreenState extends State<TankerDataScreen> {
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         setState(() {
-          _data = List<Map<String, dynamic>>.from(data['data'] ?? []);
+          if (data is Map<String, dynamic> && data.containsKey('data')) {
+            _data = List<Map<String, dynamic>>.from(data['data'] ?? []);
+          } else if (data is List) {
+            // Handle direct array response
+            _data = List<Map<String, dynamic>>.from(data);
+          } else {
+            _data = [];
+          }
+          // Sort data by date (newest first) by default
+          _sortData(_sortColumnIndex, _sortAscending);
         });
       } else {
         throw Exception('Server returned ${response.statusCode}');
@@ -175,7 +188,105 @@ class TankerDataScreenState extends State<TankerDataScreen> {
     );
   }
 
-  void _showPhoto(String url) {
+  double _getCapacityAsDouble(Map<String, dynamic> item) {
+    try {
+      final capacity = item['capacity'];
+      if (capacity == null) return 0.0;
+      if (capacity is double) return capacity;
+      if (capacity is int) return capacity.toDouble();
+      if (capacity is String) return double.tryParse(capacity) ?? 0.0;
+      return 0.0;
+    } catch (e) {
+      return 0.0;
+    }
+  }
+
+  String _formatDateTime(dynamic dateTime) {
+    try {
+      if (dateTime == null) return 'N/A';
+      if (dateTime is String) {
+        final parsed = DateTime.parse(dateTime);
+        return DateFormat('dd MMM yyyy HH:mm').format(parsed);
+      }
+      if (dateTime is DateTime) {
+        return DateFormat('dd MMM yyyy HH:mm').format(dateTime);
+      }
+      return dateTime.toString();
+    } catch (e) {
+      return 'N/A';
+    }
+  }
+  
+  String _formatDate(dynamic date) {
+    try {
+      if (date == null) return 'N/A';
+      if (date is String) {
+        final parsed = DateTime.parse(date);
+        return DateFormat('dd MMM yyyy').format(parsed);
+      }
+      if (date is DateTime) {
+        return DateFormat('dd MMM yyyy').format(date);
+      }
+      return date.toString();
+    } catch (e) {
+      return 'N/A';
+    }
+  }
+
+  void _sortData(int columnIndex, bool ascending) {
+    setState(() {
+      _sortColumnIndex = columnIndex;
+      _sortAscending = ascending;
+      
+      _data.sort((a, b) {
+        dynamic aValue;
+        dynamic bValue;
+        
+        switch (columnIndex) {
+          case 0: // Vehicle No
+            aValue = a['plateNumber'] ?? a['vehicle_no'] ?? a['plate_number'] ?? '';
+            bValue = b['plateNumber'] ?? b['vehicle_no'] ?? b['plate_number'] ?? '';
+            break;
+          case 1: // Capacity
+            aValue = _getCapacityAsDouble(a);
+            bValue = _getCapacityAsDouble(b);
+            break;
+          case 2: // Driver
+            aValue = a['driverName'] ?? a['driver_name'] ?? '';
+            bValue = b['driverName'] ?? b['driver_name'] ?? '';
+            break;
+          case 3: // Vendor
+            aValue = a['vendor'] ?? '';
+            bValue = b['vendor'] ?? '';
+            break;
+          case 4: // Date
+            try {
+              aValue = a['date'] != null ? DateTime.parse(a['date']) : DateTime(1970);
+              bValue = b['date'] != null ? DateTime.parse(b['date']) : DateTime(1970);
+            } catch (e) {
+              aValue = DateTime(1970);
+              bValue = DateTime(1970);
+            }
+            break;
+          default:
+            return 0;
+        }
+        
+        if (aValue == null && bValue == null) return 0;
+        if (aValue == null) return ascending ? -1 : 1;
+        if (bValue == null) return ascending ? 1 : -1;
+        
+        int result = Comparable.compare(aValue, bValue);
+        return ascending ? result : -result;
+      });
+    });
+  }
+
+  void _showPhoto(String? url) {
+    if (url == null || url.isEmpty) {
+      _showError('No photo URL available');
+      return;
+    }
     showDialog(
       context: context,
       builder: (context) => Dialog(
@@ -231,7 +342,11 @@ class TankerDataScreenState extends State<TankerDataScreen> {
     );
   }
 
-  Future<void> _deletePhoto(String url) async {
+  Future<void> _deletePhoto(String? url) async {
+    if (url == null || url.isEmpty) {
+      _showError('No photo URL to delete');
+      return;
+    }
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -274,7 +389,7 @@ class TankerDataScreenState extends State<TankerDataScreen> {
       context: context,
       initialDate: _selectedDate ?? DateTime.now(),
       firstDate: DateTime(2020),
-      lastDate: DateTime(2025),
+      lastDate: DateTime(2030),
     );
     if (picked != null && picked != _selectedDate) {
       setState(() => _selectedDate = picked);
@@ -314,7 +429,7 @@ class TankerDataScreenState extends State<TankerDataScreen> {
                   Expanded(
                     child: _buildStatCard(
                       'Total Capacity',
-                      '${_data.fold<double>(0, (sum, item) => sum + (item['capacity'] ?? 0)).toStringAsFixed(0)}L',
+                      '${_data.fold<double>(0, (sum, item) => sum + _getCapacityAsDouble(item)).toStringAsFixed(0)}L',
                       Icons.water_drop,
                       Colors.cyan,
                     ),
@@ -323,7 +438,7 @@ class TankerDataScreenState extends State<TankerDataScreen> {
                   Expanded(
                     child: _buildStatCard(
                       'With Photos',
-                      _data.where((item) => item['photo_url'] != null).length.toString(),
+                      _data.where((item) => item['photoUrl'] != null || item['photo_url'] != null).length.toString(),
                       Icons.photo_camera,
                       Colors.green,
                     ),
@@ -336,13 +451,32 @@ class TankerDataScreenState extends State<TankerDataScreen> {
               scrollDirection: Axis.horizontal,
               child: DataTable(
                 headingRowColor: MaterialStateProperty.all(Colors.grey[100]),
-                columns: const [
-                  DataColumn(label: Text('Vehicle No', style: TextStyle(fontWeight: FontWeight.bold))),
-                  DataColumn(label: Text('Capacity (L)', style: TextStyle(fontWeight: FontWeight.bold))),
-                  DataColumn(label: Text('Driver', style: TextStyle(fontWeight: FontWeight.bold))),
-                  DataColumn(label: Text('Vendor', style: TextStyle(fontWeight: FontWeight.bold))),
-                  DataColumn(label: Text('Photo', style: TextStyle(fontWeight: FontWeight.bold))),
-                  DataColumn(label: Text('Actions', style: TextStyle(fontWeight: FontWeight.bold))),
+                sortColumnIndex: _sortColumnIndex,
+                sortAscending: _sortAscending,
+                columns: [
+                  DataColumn(
+                    label: const Text('Vehicle No', style: TextStyle(fontWeight: FontWeight.bold)),
+                    onSort: (columnIndex, ascending) => _sortData(columnIndex, ascending),
+                  ),
+                  DataColumn(
+                    label: const Text('Capacity (L)', style: TextStyle(fontWeight: FontWeight.bold)),
+                    numeric: true,
+                    onSort: (columnIndex, ascending) => _sortData(columnIndex, ascending),
+                  ),
+                  DataColumn(
+                    label: const Text('Driver', style: TextStyle(fontWeight: FontWeight.bold)),
+                    onSort: (columnIndex, ascending) => _sortData(columnIndex, ascending),
+                  ),
+                  DataColumn(
+                    label: const Text('Vendor', style: TextStyle(fontWeight: FontWeight.bold)),
+                    onSort: (columnIndex, ascending) => _sortData(columnIndex, ascending),
+                  ),
+                  DataColumn(
+                    label: const Text('Date', style: TextStyle(fontWeight: FontWeight.bold)),
+                    onSort: (columnIndex, ascending) => _sortData(columnIndex, ascending),
+                  ),
+                  const DataColumn(label: Text('Photo', style: TextStyle(fontWeight: FontWeight.bold))),
+                  const DataColumn(label: Text('Actions', style: TextStyle(fontWeight: FontWeight.bold))),
                 ],
                 rows: _data.map((item) {
                   return DataRow(
@@ -355,7 +489,7 @@ class TankerDataScreenState extends State<TankerDataScreen> {
                             borderRadius: BorderRadius.circular(6),
                           ),
                           child: Text(
-                            item['vehicle_no'] ?? item['plate_number'] ?? '',
+                            item['plateNumber'] ?? item['vehicle_no'] ?? item['plate_number'] ?? '',
                             style: const TextStyle(fontWeight: FontWeight.bold),
                           ),
                         ),
@@ -368,7 +502,7 @@ class TankerDataScreenState extends State<TankerDataScreen> {
                       ),
                       DataCell(
                         Text(
-                          item['driver_name'] ?? 'N/A',
+                          item['driverName'] ?? item['driver_name'] ?? 'N/A',
                           style: TextStyle(color: Colors.grey[700]),
                         ),
                       ),
@@ -379,7 +513,13 @@ class TankerDataScreenState extends State<TankerDataScreen> {
                         ),
                       ),
                       DataCell(
-                        item['photo_url'] != null
+                        Text(
+                          _formatDate(item['date']),
+                          style: TextStyle(color: Colors.grey[700]),
+                        ),
+                      ),
+                      DataCell(
+                        (item['photoUrl'] != null || item['photo_url'] != null)
                             ? IconButton(
                                 icon: Container(
                                   padding: const EdgeInsets.all(4),
@@ -389,7 +529,7 @@ class TankerDataScreenState extends State<TankerDataScreen> {
                                   ),
                                   child: const Icon(Icons.photo, color: Colors.green),
                                 ),
-                                onPressed: () => _showPhoto(item['photo_url']),
+                                onPressed: () => _showPhoto(item['photoUrl'] ?? item['photo_url']),
                                 tooltip: 'View Photo',
                               )
                             : Container(
@@ -470,21 +610,22 @@ class TankerDataScreenState extends State<TankerDataScreen> {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text('Tanker Details: ${tanker['vehicle_no'] ?? tanker['plate_number']}'),
+        title: Text('Tanker Details: ${tanker['plateNumber'] ?? tanker['vehicle_no'] ?? tanker['plate_number']}'),
         content: SingleChildScrollView(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              _buildDetailRow('Vehicle Number', tanker['vehicle_no'] ?? tanker['plate_number'] ?? 'N/A'),
+              _buildDetailRow('Vehicle Number', tanker['plateNumber'] ?? tanker['vehicle_no'] ?? tanker['plate_number'] ?? 'N/A'),
               _buildDetailRow('Capacity', '${tanker['capacity'] ?? 'N/A'}L'),
-              _buildDetailRow('Driver Name', tanker['driver_name'] ?? 'N/A'),
-              _buildDetailRow('Driver Contact', tanker['driver_contact'] ?? 'N/A'),
+              _buildDetailRow('Driver Name', tanker['driverName'] ?? tanker['driver_name'] ?? 'N/A'),
+              _buildDetailRow('Driver Contact', tanker['driverContact'] ?? tanker['driver_contact'] ?? 'N/A'),
               _buildDetailRow('Vendor', tanker['vendor'] ?? 'N/A'),
+              _buildDetailRow('Date', _formatDate(tanker['date'])),
               if (tanker['latitude'] != null && tanker['longitude'] != null)
                 _buildDetailRow('Location', '${tanker['latitude']}, ${tanker['longitude']}'),
-              if (tanker['last_updated'] != null)
-                _buildDetailRow('Last Updated', DateTime.parse(tanker['last_updated']).toString()),
+              if (tanker['lastUpdated'] != null || tanker['last_updated'] != null)
+                _buildDetailRow('Last Updated', _formatDateTime(tanker['lastUpdated'] ?? tanker['last_updated'])),
             ],
           ),
         ),
@@ -663,17 +804,35 @@ class _AddTankerDialogState extends State<AddTankerDialog> {
   final _driverNameController = TextEditingController();
   final _driverContactController = TextEditingController();
   final _vendorController = TextEditingController();
+  final _dateController = TextEditingController();
   File? _photoFile;
   Position? _location;
   bool _isProcessing = false;
   String? _photoError;
   bool _isValidatingImage = false;
   double? _capacity;
+  DateTime _selectedDate = DateTime.now();
 
   @override
   void initState() {
     super.initState();
     _getCurrentLocation();
+    _dateController.text = DateFormat('yyyy-MM-dd').format(_selectedDate);
+  }
+
+  Future<void> _selectDate(BuildContext context) async {
+    final DateTime? picked = await showDatePicker(
+      context: context,
+      initialDate: _selectedDate,
+      firstDate: DateTime(2020),
+      lastDate: DateTime(2030),
+    );
+    if (picked != null && picked != _selectedDate) {
+      setState(() {
+        _selectedDate = picked;
+        _dateController.text = DateFormat('yyyy-MM-dd').format(picked);
+      });
+    }
   }
 
   Future<void> _getCurrentLocation() async {
@@ -839,6 +998,7 @@ class _AddTankerDialogState extends State<AddTankerDialog> {
         'driverName': _driverNameController.text.trim(),
         'driverContact': _driverContactController.text.trim(),
         'vendor': _vendorController.text.trim(),
+        'date': _dateController.text.trim(),
         'lastUpdated': DateTime.now().toIso8601String(),
         'latitude': _location?.latitude.toString() ?? '',
         'longitude': _location?.longitude.toString() ?? '',
@@ -973,6 +1133,21 @@ class _AddTankerDialogState extends State<AddTankerDialog> {
               ),
               const SizedBox(height: 16),
               TextFormField(
+                controller: _dateController,
+                decoration: InputDecoration(
+                  labelText: 'Date',
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  suffixIcon: const Icon(Icons.calendar_today),
+                ),
+                readOnly: true,
+                onTap: () => _selectDate(context),
+                validator: (value) =>
+                    value?.isEmpty ?? true ? 'Required' : null,
+              ),
+              const SizedBox(height: 16),
+              TextFormField(
                 controller: _capacityController,
                 decoration: const InputDecoration(labelText: 'Capacity (L)'),
                 keyboardType: TextInputType.number,
@@ -1043,6 +1218,7 @@ class _AddTankerDialogState extends State<AddTankerDialog> {
     _driverNameController.dispose();
     _driverContactController.dispose();
     _vendorController.dispose();
+    _dateController.dispose();
     super.dispose();
   }
 }
@@ -1067,8 +1243,8 @@ class _EditTankerDialogState extends State<EditTankerDialog> {
   @override
   void initState() {
     super.initState();
-    _vehicleController = TextEditingController(text: widget.data['vehicle_no']);
-    _capacityController = TextEditingController(text: widget.data['capacity'].toString());
+    _vehicleController = TextEditingController(text: widget.data['plateNumber'] ?? widget.data['vehicle_no'] ?? '');
+    _capacityController = TextEditingController(text: (widget.data['capacity'] ?? 0).toString());
   }
 
   @override

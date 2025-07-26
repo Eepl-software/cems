@@ -56,8 +56,8 @@ class DocumentService {
       if (search != null && search.isNotEmpty) queryParams['search'] = search;
       if (expiringSoon) queryParams['expiring_soon'] = 'true';
 
-      // Fix potential string interpolation issue by using Uri.http directly
-      final uri = Uri.http('54.146.215.18:3000', '/api/documents', queryParams);
+      // Fix potential string interpolation issue by constructing URI properly
+      final uri = Uri.parse('$baseUrl/api/documents').replace(queryParameters: queryParams);
       print('DocumentService: Loading documents from URI: $uri');
       
       final response = await http.get(uri, headers: headers);
@@ -78,7 +78,7 @@ class DocumentService {
     try {
       final headers = await _getHeaders();
       final response = await http.get(
-        Uri.http('54.146.215.18:3000', '/api/documents/$id'),
+        Uri.parse('$baseUrl/api/documents/$id'),
         headers: headers,
       );
 
@@ -99,17 +99,14 @@ class DocumentService {
     required String name,
     required String category,
     required File file,
-    String? description,
-    List<String>? tags,
     String status = 'Active',
-    DateTime? expiryDate,
   }) async {
     try {
       final headers = await _getMultipartHeaders();
       
       final request = http.MultipartRequest(
         'POST',
-        Uri.http('54.146.215.18:3000', '/api/documents'),
+        Uri.parse('$baseUrl/api/documents'),
       );
 
       // Add headers
@@ -122,18 +119,6 @@ class DocumentService {
       request.fields['name'] = name;
       request.fields['category'] = category;
       request.fields['status'] = status;
-      
-      if (description != null) {
-        request.fields['description'] = description;
-      }
-      
-      if (tags != null && tags.isNotEmpty) {
-        request.fields['tags'] = tags.join(',');
-      }
-      
-      if (expiryDate != null) {
-        request.fields['expiry_date'] = expiryDate.toIso8601String().split('T')[0];
-      }
 
       final streamedResponse = await request.send();
       final response = await http.Response.fromStream(streamedResponse);
@@ -175,7 +160,7 @@ class DocumentService {
       }
 
       final response = await http.put(
-        Uri.http('54.146.215.18:3000', '/api/documents/$id'),
+        Uri.parse('$baseUrl/api/documents/$id'),
         headers: headers,
         body: json.encode(body),
       );
@@ -197,7 +182,7 @@ class DocumentService {
       final headers = await _getHeaders();
       
       final response = await http.delete(
-        Uri.http('54.146.215.18:3000', '/api/documents/$id'),
+        Uri.parse('$baseUrl/api/documents/$id'),
         headers: headers,
       );
 
@@ -218,7 +203,7 @@ class DocumentService {
       final headers = await _getHeaders();
       
       final response = await http.get(
-        Uri.http('54.146.215.18:3000', '/api/document-categories'),
+        Uri.parse('$baseUrl/api/document-categories'),
         headers: headers,
       );
 
@@ -239,7 +224,7 @@ class DocumentService {
       final headers = await _getHeaders();
       
       final response = await http.get(
-        Uri.http('54.146.215.18:3000', '/api/documents/stats'),
+        Uri.parse('$baseUrl/api/documents/stats'),
         headers: headers,
       );
 
@@ -259,7 +244,7 @@ class DocumentService {
       final headers = await _getHeaders();
       
       final response = await http.get(
-        Uri.http('54.146.215.18:3000', '/api/documents/$id/download'),
+        Uri.parse('$baseUrl/api/documents/$id/download'),
         headers: headers,
       );
 

@@ -10,6 +10,7 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
 class WeighbridgeOCR:
     """
     OCR processor for extracting weighbridge slip data
@@ -82,84 +83,76 @@ class WeighbridgeOCR:
     def parse_weights(self, text: str) -> Dict[str, Optional[str]]:
         """
         Parse extracted text to find GROSS, TARE, NET weights and vehicle number
-        
-        Args:
-            text: Extracted text from OCR
-            
-        Returns:
-            Dictionary containing extracted weights and vehicle information
         """
-        # Initialize result dictionary
         result = {
             "gross_weight": None,
             "tare_weight": None,
             "net_weight": None,
             "vehicle_number": None
         }
-        
-        # Clean and normalize text
-        text = text.upper().replace('\n', ' ').replace('\r', ' ')
-        
-        # Define patterns for different weight formats and vehicle numbers
+
+        # Normalize text: replace newlines with spaces, collapse multiple spaces, uppercase
+        text = re.sub(r'[\n\r]+', ' ', text)
+        text = re.sub(r'\s{2,}', ' ', text)
+        text = text.upper()
+
+        # Improved patterns for table format and standard formats
         patterns = {
             'gross_weight': [
-                r'GROSS\s*:?\s*(\d+(?:,\d+)*\.?\d*)\s*(KG|KGS|TONNES?|T)?',
-                r'GROSS\s+WEIGHT\s*:?\s*(\d+(?:,\d+)*\.?\d*)\s*(KG|KGS|TONNES?|T)?'
+                r'GROSS\s+(\d{4,6})',
+                r'GROSS\s*:?:?\s*(\d+(?:,\d+)*\.?\d*)\s*(KG|KGS|TONNES?|T)?',
+                r'GROSS\s+WEIGHT\s*:?:?\s*(\d+(?:,\d+)*\.?\d*)\s*(KG|KGS|TONNES?|T)?'
             ],
             'tare_weight': [
-                r'TARE\s*:?\s*(\d+(?:,\d+)*\.?\d*)\s*(KG|KGS|TONNES?|T)?',
-                r'TARE\s+WEIGHT\s*:?\s*(\d+(?:,\d+)*\.?\d*)\s*(KG|KGS|TONNES?|T)?'
+                r'TARE\s+(\d{4,6})',
+                r'TARE\s*:?:?\s*(\d+(?:,\d+)*\.?\d*)\s*(KG|KGS|TONNES?|T)?',
+                r'TARE\s+WEIGHT\s*:?:?\s*(\d+(?:,\d+)*\.?\d*)\s*(KG|KGS|TONNES?|T)?'
             ],
             'net_weight': [
-                r'NET\s*:?\s*(\d+(?:,\d+)*\.?\d*)\s*(KG|KGS|TONNES?|T)?',
-                r'NET\s+WEIGHT\s*:?\s*(\d+(?:,\d+)*\.?\d*)\s*(KG|KGS|TONNES?|T)?',
-                r'NETT\s*:?\s*(\d+(?:,\d+)*\.?\d*)\s*(KG|KGS|TONNES?|T)?'
+                r'NET\s+(\d{4,6}(?:\.\d+)?)',
+                r'NET\s*:?:?\s*(\d+(?:,\d+)*\.?\d*)\s*(KG|KGS|TONNES?|T)?',
+                r'NET\s+WEIGHT\s*:?:?\s*(\d+(?:,\d+)*\.?\d*)\s*(KG|KGS|TONNES?|T)?',
+                r'NETT\s*:?:?\s*(\d+(?:,\d+)*\.?\d*)\s*(KG|KGS|TONNES?|T)?'
             ]
         }
-        
-        # Vehicle number patterns (Indian format and variations)
+
+        # Vehicle number patterns (unchanged)
         vehicle_patterns = [
-            # With labels
-            r'VEHICLE\s*(?:NO|NUMBER|NUM)?\s*:?\s*([A-Z]{2}\s*\d{1,2}\s*[A-Z]{1,2}\s*\d{1,4})',
-            r'VEH\s*(?:NO|NUMBER|NUM)?\s*:?\s*([A-Z]{2}\s*\d{1,2}\s*[A-Z]{1,2}\s*\d{1,4})',
-            r'TRUCK\s*(?:NO|NUMBER|NUM)?\s*:?\s*([A-Z]{2}\s*\d{1,2}\s*[A-Z]{1,2}\s*\d{1,4})',
-            r'REG\s*(?:NO|NUMBER|NUM)?\s*:?\s*([A-Z]{2}\s*\d{1,2}\s*[A-Z]{1,2}\s*\d{1,4})',
-            r'REGISTRATION\s*(?:NO|NUMBER|NUM)?\s*:?\s*([A-Z]{2}\s*\d{1,2}\s*[A-Z]{1,2}\s*\d{1,4})',
-            # Direct patterns (most common)
-            r'\b([A-Z]{2}\s*\d{1,2}\s*[A-Z]{1,2}\s*\d{3,4})\b',  # With spaces
-            r'\b([A-Z]{2}\d{1,2}[A-Z]{1,2}\d{3,4})\b',  # Without spaces
-            # More flexible patterns
-            r'([A-Z]{2}\s*\d{1,2}\s*[A-Z]{1,3}\s*\d{1,4})',  # Flexible letter count
-            # Fallback patterns for poorly scanned text
-            r'([A-Z0-9]{2}\s*\d{1,2}\s*[A-Z0-9]{1,2}\s*\d{3,4})',  # With potential OCR errors
+            r'VEHICLE\s*(?:NO|NUMBER|NUM)?\s*:?:?\s*([A-Z]{2}\s*\d{1,2}\s*[A-Z]{1,2}\s*\d{1,4})',
+            r'VEH\s*(?:NO|NUMBER|NUM)?\s*:?:?\s*([A-Z]{2}\s*\d{1,2}\s*[A-Z]{1,2}\s*\d{1,4})',
+            r'TRUCK\s*(?:NO|NUMBER|NUM)?\s*:?:?\s*([A-Z]{2}\s*\d{1,2}\s*[A-Z]{1,2}\s*\d{1,4})',
+            r'REG\s*(?:NO|NUMBER|NUM)?\s*:?:?\s*([A-Z]{2}\s*\d{1,2}\s*[A-Z]{1,2}\s*\d{1,4})',
+            r'REGISTRATION\s*(?:NO|NUMBER|NUM)?\s*:?:?\s*([A-Z]{2}\s*\d{1,2}\s*[A-Z]{1,2}\s*\d{1,4})',
+            r'\b([A-Z]{2}\s*\d{1,2}\s*[A-Z]{1,2}\s*\d{3,4})\b',
+            r'\b([A-Z]{2}\d{1,2}[A-Z]{1,2}\d{3,4})\b',
+            r'([A-Z]{2}\s*\d{1,2}\s*[A-Z]{1,3}\s*\d{1,4})',
+            r'([A-Z0-9]{2}\s*\d{1,2}\s*[A-Z0-9]{1,2}\s*\d{3,4})',
         ]
-        
-        # Extract weights using regex patterns
+
+        # Extract weights using improved regex patterns
         for weight_type, pattern_list in patterns.items():
             for pattern in pattern_list:
                 match = re.search(pattern, text)
                 if match:
+                    logger.info(f"Matched {weight_type} with pattern: {pattern} -> {match.group(0)}")
                     weight_value = match.group(1).replace(',', '')
-                    unit = match.group(2) if match.group(2) else 'Kg'
+                    # Use unit if present, else default to 'Kg'
+                    unit = match.group(2) if len(match.groups()) > 1 and match.group(2) else 'Kg'
                     result[weight_type] = f"{weight_value} {unit}"
                     break
-        
-        # Extract vehicle number
-        logger.info(f"Searching for vehicle number in text: {text[:200]}...")  # Log first 200 chars
-        
+
+        # Extract vehicle number (unchanged)
+        logger.info(f"Searching for vehicle number in text: {text[:200]}...")
         for i, pattern in enumerate(vehicle_patterns):
             match = re.search(pattern, text)
             if match:
-                vehicle_num = match.group(1).replace(' ', '')  # Remove spaces
-                # Clean up common OCR errors
+                vehicle_num = match.group(1).replace(' ', '')
                 vehicle_num = vehicle_num.replace('O', '0').replace('I', '1')
                 result['vehicle_number'] = vehicle_num
                 logger.info(f"Vehicle number extracted with pattern {i}: {vehicle_num}")
                 break
-        
         if not result['vehicle_number']:
             logger.warning("No vehicle number found in OCR text")
-        
         return result
     
     def validate_weights(self, weights: Dict[str, Optional[str]]) -> bool:

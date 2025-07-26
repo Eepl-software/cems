@@ -1,11 +1,11 @@
 {
-    "name": "learningdart",
-    "short_name": "learningdart",
+    "name": "CEMS - Construction & Environmental Management",
+    "short_name": "CEMS",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "background_color": "#2196F3",
+    "theme_color": "#2196F3",
+    "description": "Construction and Environmental Management System",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

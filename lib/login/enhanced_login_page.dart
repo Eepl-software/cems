@@ -5,7 +5,7 @@ import '../services/enhanced_api_service.dart';
 import '../widgets/biometric_login_widget.dart';
 import '../home_page.dart';
 import '../models.dart';
-import '../auth_service.dart';
+import 'auth_service.dart';
 
 /// Enhanced login page with biometric authentication support
 class EnhancedLoginPage extends StatefulWidget {

@@ -1,8 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as img;
 import 'dart:io';
-import 'package:namer_app/services/image_classifier.dart';
-import 'package:namer_app/services/image_service.dart';
+import 'package:prestige_park_groove/services/image_classifier.dart';
+import 'package:prestige_park_groove/services/image_service.dart';
 
 void main() {
   late ImageClassifier imageClassifier;

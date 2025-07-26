@@ -274,7 +274,7 @@ class _LabourColonyPageState extends State<LabourColonyPage> {
       context: context,
       initialDate: _selectedDate ?? DateTime.now(),
       firstDate: DateTime(2020),
-      lastDate: DateTime(2025),
+      lastDate: DateTime(2030),
       builder: (context, child) {
         return Theme(
           data: Theme.of(context).copyWith(
@@ -519,7 +519,7 @@ class _LabourColonyFormDialogState extends State<LabourColonyFormDialog> {
       context: context,
       initialDate: _selectedDate,
       firstDate: DateTime(2020),
-      lastDate: DateTime(2025),
+      lastDate: DateTime(2030),
     );
     if (picked != null && picked != _selectedDate) {
       setState(() => _selectedDate = picked);
