@@ -19,6 +19,8 @@ class _ConstructionWasteAnalyticsWidgetState extends State<ConstructionWasteAnal
   Map<String, dynamic> _analyticsData = {};
   List<ConstructionWasteRecord> _recentRecords = [];
   String _selectedPeriod = '30'; // Days
+  Map<String, dynamic> _cdWasteStats = {};
+  Map<String, dynamic> _config = {};
   
   final List<String> _periodOptions = ['7', '30', '90', '365'];
   final Map<String, String> _periodLabels = {
@@ -45,36 +47,60 @@ class _ConstructionWasteAnalyticsWidgetState extends State<ConstructionWasteAnal
     setState(() => _isLoading = true);
     
     try {
-      const String baseUrl = 'http://54.146.215.18:3000';
       final endDate = DateTime.now();
       final startDate = endDate.subtract(Duration(days: int.parse(_selectedPeriod)));
       
-      // Fetch analytics data
-      final statsResponse = await http.get(
-        Uri.http('54.146.215.18:3000', '/construction-phase-waste/stats', {
-          'start_date': DateFormat('yyyy-MM-dd').format(startDate),
-          'end_date': DateFormat('yyyy-MM-dd').format(endDate),
-        }),
-      );
+      // Fetch all data in parallel
+      final results = await Future.wait([
+        // Construction phase waste stats
+        http.get(
+          Uri.http('54.146.215.18:3000', '/construction-phase-waste/stats', {
+            'start_date': DateFormat('yyyy-MM-dd').format(startDate),
+            'end_date': DateFormat('yyyy-MM-dd').format(endDate),
+          }),
+        ),
+        // Construction phase waste records
+        http.get(
+          Uri.http('54.146.215.18:3000', '/construction-phase-waste', {
+            'limit': '50',
+            'start_date': DateFormat('yyyy-MM-dd').format(startDate),
+            'end_date': DateFormat('yyyy-MM-dd').format(endDate),
+          }),
+        ),
+        // C&D waste stats
+        http.get(
+          Uri.http('54.146.215.18:3000', '/cd-waste/stats', {
+            'start_date': DateFormat('yyyy-MM-dd').format(startDate),
+            'end_date': DateFormat('yyyy-MM-dd').format(endDate),
+          }),
+        ),
+        // Configuration
+        http.get(Uri.http('54.146.215.18:3000', '/cd-waste/config')),
+      ]);
       
-      // Fetch recent records for trend analysis
-      final recordsResponse = await http.get(
-        Uri.http('54.146.215.18:3000', '/construction-phase-waste', {
-          'limit': '50',
-          'start_date': DateFormat('yyyy-MM-dd').format(startDate),
-          'end_date': DateFormat('yyyy-MM-dd').format(endDate),
-        }),
-      );
-      
-      if (statsResponse.statusCode == 200 && recordsResponse.statusCode == 200) {
-        final statsData = json.decode(statsResponse.body);
-        final recordsData = json.decode(recordsResponse.body);
+      if (results[0].statusCode == 200 && results[1].statusCode == 200) {
+        final statsData = json.decode(results[0].body);
+        final recordsData = json.decode(results[1].body);
         
         setState(() {
           _analyticsData = statsData;
           _recentRecords = (recordsData['data'] as List? ?? [])
               .map((json) => ConstructionWasteRecord.fromJson(json))
               .toList();
+        });
+      }
+      
+      if (results[2].statusCode == 200) {
+        final cdWasteData = json.decode(results[2].body);
+        setState(() {
+          _cdWasteStats = cdWasteData;
+        });
+      }
+      
+      if (results[3].statusCode == 200) {
+        final configData = json.decode(results[3].body);
+        setState(() {
+          _config = configData['config'] ?? {};
         });
       }
     } catch (e) {
@@ -819,28 +845,58 @@ class _ConstructionWasteAnalyticsWidgetState extends State<ConstructionWasteAnal
   }
 
   Widget _buildKeyInsights() {
-    return Card(
-      elevation: 4,
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
+    return Column(
+      children: [
+        Card(
+          elevation: 4,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Icon(Icons.lightbulb, color: Colors.brown[700]),
-                const SizedBox(width: 8),
-                const Text(
-                  'Key Insights',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                Row(
+                  children: [
+                    Icon(Icons.lightbulb, color: Colors.brown[700]),
+                    const SizedBox(width: 8),
+                    const Text(
+                      'Construction Phase Insights',
+                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                    ),
+                  ],
                 ),
+                const SizedBox(height: 16),
+                ..._generateInsights().map((insight) => _buildInsightItem(insight)),
               ],
             ),
-            const SizedBox(height: 16),
-            ..._generateInsights().map((insight) => _buildInsightItem(insight)),
-          ],
+          ),
         ),
-      ),
+        if (_cdWasteStats.isNotEmpty) ...[
+          const SizedBox(height: 16),
+          Card(
+            elevation: 4,
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.eco, color: Colors.brown[700]),
+                      const SizedBox(width: 8),
+                      const Text(
+                        'C&D Waste Insights',
+                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  ..._generateCDWasteInsights().map((insight) => _buildInsightItem(insight)),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ],
     );
   }
 
@@ -1112,6 +1168,59 @@ class _ConstructionWasteAnalyticsWidgetState extends State<ConstructionWasteAnal
         'text': 'Consider implementing waste segregation at source to improve recycling rates.'
       },
     ];
+  }
+
+  List<Map<String, dynamic>> _generateCDWasteInsights() {
+    final summary = _cdWasteStats['summary'] ?? {};
+    final totalWaste = _safeParseDouble(summary['total_waste']);
+    final avgWastePerProject = _safeParseDouble(summary['avg_waste_per_project']);
+    final wastePerArea = _safeParseDouble(summary['waste_per_area']);
+    final constructionTypesCount = summary['construction_types_count'] ?? 0;
+    
+    final insights = <Map<String, dynamic>>[];
+    
+    if (totalWaste > 0) {
+      insights.add({
+        'icon': Icons.construction,
+        'color': Colors.blue,
+        'text': 'Total C&D waste: ${(totalWaste / 1000).toStringAsFixed(1)} tons across ${summary['total_records']} projects.'
+      });
+    }
+    
+    if (wastePerArea > 0) {
+      final thresholdGood = _config['thresholds']?['wastePerArea']?['good'] ?? 50;
+      final isGood = wastePerArea <= thresholdGood;
+      
+      insights.add({
+        'icon': isGood ? Icons.check_circle : Icons.warning,
+        'color': isGood ? Colors.green : Colors.orange,
+        'text': 'Average waste generation: ${wastePerArea.toStringAsFixed(1)} kg/sq ft ${isGood ? "(within target)" : "(above target of $thresholdGood kg/sq ft)"}.'
+      });
+    }
+    
+    if (constructionTypesCount > 1) {
+      insights.add({
+        'icon': Icons.diversity_3,
+        'color': Colors.purple,
+        'text': 'Diverse project portfolio with $constructionTypesCount different construction types.'
+      });
+    }
+    
+    // Add insights from waste by construction type
+    final wasteByType = _cdWasteStats['wasteByConstructionType'] as List? ?? [];
+    if (wasteByType.isNotEmpty) {
+      final topType = wasteByType.first;
+      final typeName = topType['construction_type'] ?? 'Unknown';
+      final typeWaste = _safeParseDouble(topType['total_waste']);
+      
+      insights.add({
+        'icon': Icons.trending_up,
+        'color': Colors.indigo,
+        'text': '$typeName projects generate the most waste (${(typeWaste / 1000).toStringAsFixed(1)} tons).'
+      });
+    }
+    
+    return insights;
   }
 
   List<Map<String, dynamic>> _generateRecommendations() {

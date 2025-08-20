@@ -269,7 +269,7 @@ class _RegistrationPageState extends State<RegistrationPage> {
             shape: BoxShape.circle,
             color: Colors.blue.shade50,
           ),
-          child: Image.asset('assets/Prestige.jpeg', height: 80),
+          child: Image.asset('assets/prestige_logo.png', height: 80),
         ),
         const SizedBox(height: 20),
         Text(

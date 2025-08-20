@@ -67,6 +67,155 @@ class _EnhancedLoginPageState extends State<EnhancedLoginPage>
     _checkBiometricSupport();
   }
 
+  Widget _buildFeatureHighlights() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceAround,
+        children: [
+          _buildFeatureItem(Icons.eco, 'Eco-Friendly'),
+          _buildFeatureItem(Icons.security, 'Secure'),
+          _buildFeatureItem(Icons.analytics, 'Analytics'),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFeatureItem(IconData icon, String label) {
+    return Column(
+      children: [
+        Icon(
+          icon,
+          color: Colors.white.withValues(alpha: 0.9),
+          size: 24,
+        ),
+        const SizedBox(height: 4),
+        Text(
+          label,
+          style: TextStyle(
+            color: Colors.white.withValues(alpha: 0.8),
+            fontSize: 11,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildStatisticsSection() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            Colors.white.withValues(alpha: 0.15),
+            Colors.white.withValues(alpha: 0.08),
+          ],
+        ),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: Colors.white.withValues(alpha: 0.2),
+          width: 1,
+        ),
+      ),
+      child: Column(
+        children: [
+          Text(
+            'SYSTEM OVERVIEW',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 1.2,
+            ),
+          ),
+          const SizedBox(height: 16),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceAround,
+            children: [
+              _buildStatItem('Active Users', '248', Icons.people),
+              _buildStatItem('Projects', '12', Icons.folder_special),
+              _buildStatItem('Reports', '1.2K', Icons.assessment),
+            ],
+          ),
+          const SizedBox(height: 16),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.green.withValues(alpha: 0.2),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(
+                color: Colors.green.withValues(alpha: 0.3),
+                width: 1,
+              ),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(
+                  Icons.check_circle,
+                  color: Colors.white.withValues(alpha: 0.9),
+                  size: 16,
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  'System Status: Online',
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.9),
+                    fontSize: 13,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStatItem(String label, String value, IconData icon) {
+    return Column(
+      children: [
+        Container(
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.1),
+            shape: BoxShape.circle,
+          ),
+          child: Icon(
+            icon,
+            color: Colors.white.withValues(alpha: 0.8),
+            size: 20,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          value,
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: 18,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          label,
+          style: TextStyle(
+            color: Colors.white.withValues(alpha: 0.7),
+            fontSize: 11,
+          ),
+        ),
+      ],
+    );
+  }
+
   void _initializeAnimations() {
     _animationController = AnimationController(
       duration: const Duration(milliseconds: 1500),
@@ -424,17 +573,24 @@ class _EnhancedLoginPageState extends State<EnhancedLoginPage>
       animation: _scaleAnimation,
       child: Column(
         children: [
-          // Logo Section
+          // Logo Section with Project Info
           Card(
             elevation: 8,
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(15),
             ),
             child: Container(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(20),
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(15),
-                color: Colors.white,
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [
+                    Colors.white,
+                    Colors.grey.shade50,
+                  ],
+                ),
               ),
               child: Column(
                 children: [
@@ -447,23 +603,30 @@ class _EnhancedLoginPageState extends State<EnhancedLoginPage>
                         decoration: BoxDecoration(
                           shape: BoxShape.circle,
                           color: _isAdminLogin ? Colors.red.shade50 : Colors.teal.shade50,
+                          boxShadow: [
+                            BoxShadow(
+                              color: (_isAdminLogin ? Colors.red : Colors.teal).withValues(alpha: 0.2),
+                              blurRadius: 10,
+                              spreadRadius: 2,
+                            ),
+                          ],
                         ),
                         child: Image.asset(
-                          'assets/Prestige.jpeg',
-                          height: 60,
+                          'assets/prestige_logo.png',
+                          height: 70,
                           fit: BoxFit.contain,
                           errorBuilder: (context, error, stackTrace) {
                             return Container(
-                              height: 60,
-                              width: 60,
+                              height: 70,
+                              width: 70,
                               decoration: BoxDecoration(
                                 color: _isAdminLogin ? Colors.red.shade100 : Colors.teal.shade100,
-                                borderRadius: BorderRadius.circular(30),
+                                borderRadius: BorderRadius.circular(35),
                               ),
                               child: Icon(
                                 Icons.business,
                                 color: _isAdminLogin ? Colors.red.shade700 : Colors.teal.shade700,
-                                size: 30,
+                                size: 35,
                               ),
                             );
                           },
@@ -472,17 +635,32 @@ class _EnhancedLoginPageState extends State<EnhancedLoginPage>
                     ),
                   ),
                   const SizedBox(height: 16),
+                  Text(
+                    'PRESTIGE PARK GROOVE',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.grey.shade700,
+                      letterSpacing: 1.5,
+                    ),
+                  ),
+                  const SizedBox(height: 20),
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                     children: [
                       _buildLogoButton(
-                        'assets/L&T.png',
-                        'https://www.iisc.ac.in',
+                        'assets/LT.png',
+                        'https://www.larsentoubro.com',
                         'L&T',
                       ),
+                      Container(
+                        height: 40,
+                        width: 1,
+                        color: Colors.grey.shade300,
+                      ),
                       _buildLogoButton(
-                        'assets/IISC_logo.jpeg',
-                        'https://www.larsentoubro.com',
+                        'assets/iisc_logo.png',
+                        'https://www.iisc.ac.in',
                         'IISC',
                       ),
                     ],
@@ -491,30 +669,56 @@ class _EnhancedLoginPageState extends State<EnhancedLoginPage>
               ),
             ),
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 24),
+          // Title Section
           Text(
             'Sustainable Infrastructure',
             style: TextStyle(
-              fontSize: 28,
+              fontSize: 32,
               fontWeight: FontWeight.bold,
               color: Colors.white,
+              letterSpacing: 0.5,
               shadows: [
                 Shadow(
-                  color: Colors.black.withValues(alpha: 0.3),
-                  offset: const Offset(0, 2),
-                  blurRadius: 4,
+                  color: Colors.black.withValues(alpha: 0.4),
+                  offset: const Offset(0, 3),
+                  blurRadius: 6,
                 ),
               ],
             ),
           ),
           const SizedBox(height: 8),
           Text(
-            _isAdminLogin ? 'Admin Access Portal' : 'Sign in to your account',
+            'Construction & Environmental Management System',
             style: TextStyle(
-              fontSize: 16,
-              color: Colors.white.withValues(alpha: 0.9),
+              fontSize: 14,
+              color: Colors.white.withValues(alpha: 0.95),
+              letterSpacing: 0.3,
             ),
           ),
+          const SizedBox(height: 8),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.15),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(
+                color: Colors.white.withValues(alpha: 0.3),
+                width: 1,
+              ),
+            ),
+            child: Text(
+              _isAdminLogin ? '🔐 Admin Access Portal' : '👤 Sign in to your account',
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+                color: Colors.white,
+              ),
+            ),
+          ),
+          const SizedBox(height: 20),
+          // Feature highlights
+          _buildFeatureHighlights(),
         ],
       ),
       builder: (context, child) {
@@ -569,7 +773,7 @@ class _EnhancedLoginPageState extends State<EnhancedLoginPage>
 
   Widget _buildLoginTypeToggle() {
     return Container(
-      margin: const EdgeInsets.only(bottom: 20),
+      margin: const EdgeInsets.only(bottom: 16),
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: 0.1),
         borderRadius: BorderRadius.circular(12),
@@ -859,7 +1063,7 @@ class _EnhancedLoginPageState extends State<EnhancedLoginPage>
     return Container(
       width: double.infinity,
       height: 56,
-      margin: const EdgeInsets.only(bottom: 20),
+      margin: const EdgeInsets.only(bottom: 16),
       child: ElevatedButton(
         onPressed: _isLoading ? null : _handleLogin,
         style: ElevatedButton.styleFrom(
@@ -981,6 +1185,49 @@ class _EnhancedLoginPageState extends State<EnhancedLoginPage>
   Widget _buildFooter() {
     return Column(
       children: [
+        // System Info Section
+        Container(
+          padding: const EdgeInsets.all(12),
+          margin: const EdgeInsets.only(bottom: 16),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.1),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: Colors.white.withValues(alpha: 0.2),
+              width: 1,
+            ),
+          ),
+          child: Column(
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(
+                    Icons.shield_outlined,
+                    color: Colors.white.withValues(alpha: 0.8),
+                    size: 16,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    'Secure Connection • 256-bit Encryption',
+                    style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.8),
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Version 3.2.0 • Build 8',
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.6),
+                  fontSize: 11,
+                ),
+              ),
+            ],
+          ),
+        ),
         if (!_isAdminLogin) ...[
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
@@ -1025,7 +1272,50 @@ class _EnhancedLoginPageState extends State<EnhancedLoginPage>
             ),
           ),
         ],
-        const SizedBox(height: 20),
+        const SizedBox(height: 16),
+        // Help & Support Links
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            TextButton.icon(
+              onPressed: () => _showHelpDialog(),
+              icon: Icon(
+                Icons.help_outline,
+                size: 16,
+                color: Colors.white.withValues(alpha: 0.7),
+              ),
+              label: Text(
+                'Help',
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.7),
+                  fontSize: 13,
+                ),
+              ),
+            ),
+            Text(
+              ' • ',
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.5),
+              ),
+            ),
+            TextButton.icon(
+              onPressed: () => _showContactDialog(),
+              icon: Icon(
+                Icons.support_agent,
+                size: 16,
+                color: Colors.white.withValues(alpha: 0.7),
+              ),
+              label: Text(
+                'Support',
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.7),
+                  fontSize: 13,
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
         if (_isAdminLogin) ...[
           Container(
             padding: const EdgeInsets.all(12),
@@ -1051,6 +1341,178 @@ class _EnhancedLoginPageState extends State<EnhancedLoginPage>
           ),
         ],
       ],
+    );
+  }
+
+  void _showHelpDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Row(
+          children: [
+            Icon(Icons.help_outline, color: Colors.teal.shade700),
+            const SizedBox(width: 8),
+            const Text('Help & Documentation'),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'CEMS Login Help',
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                fontSize: 16,
+                color: Colors.grey.shade800,
+              ),
+            ),
+            const SizedBox(height: 12),
+            _buildHelpItem('• Use your registered username and password'),
+            _buildHelpItem('• Admin users require additional verification'),
+            _buildHelpItem('• Biometric login available for registered devices'),
+            _buildHelpItem('• Contact support for password reset'),
+            const SizedBox(height: 16),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.blue.shade50,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.blue.shade200),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.info_outline, color: Colors.blue.shade700, size: 20),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'For security reasons, accounts are locked after 5 failed attempts.',
+                      style: TextStyle(
+                        color: Colors.blue.shade700,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('CLOSE'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHelpItem(String text) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Text(
+        text,
+        style: TextStyle(
+          color: Colors.grey.shade700,
+          fontSize: 14,
+        ),
+      ),
+    );
+  }
+
+  void _showContactDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Row(
+          children: [
+            Icon(Icons.support_agent, color: Colors.teal.shade700),
+            const SizedBox(width: 8),
+            const Text('Contact Support'),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _buildContactItem(Icons.email, 'Email', 'support@prestigepark.com'),
+            _buildContactItem(Icons.phone, 'Phone', '+91 80 1234 5678'),
+            _buildContactItem(Icons.access_time, 'Hours', 'Mon-Fri, 9AM-6PM IST'),
+            const SizedBox(height: 16),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.green.shade50,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.green.shade200),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.chat, color: Colors.green.shade700, size: 20),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Live chat available for immediate assistance',
+                      style: TextStyle(
+                        color: Colors.green.shade700,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('CLOSE'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _openWebsite('mailto:support@prestigepark.com');
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.teal,
+            ),
+            child: const Text('EMAIL SUPPORT'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildContactItem(IconData icon, String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Row(
+        children: [
+          Icon(icon, color: Colors.grey.shade600, size: 20),
+          const SizedBox(width: 12),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                label,
+                style: TextStyle(
+                  color: Colors.grey.shade600,
+                  fontSize: 12,
+                ),
+              ),
+              Text(
+                value,
+                style: const TextStyle(
+                  fontWeight: FontWeight.w500,
+                  fontSize: 14,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 
@@ -1304,6 +1766,38 @@ class _EnhancedLoginPageState extends State<EnhancedLoginPage>
                             key: _formKey,
                             child: Column(
                               children: [
+                                // Login Form Info Badge
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                  margin: const EdgeInsets.only(bottom: 16),
+                                  decoration: BoxDecoration(
+                                    color: Colors.blue.shade50,
+                                    borderRadius: BorderRadius.circular(8),
+                                    border: Border.all(
+                                      color: Colors.blue.shade200,
+                                      width: 1,
+                                    ),
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Icon(
+                                        Icons.info_outline,
+                                        color: Colors.blue.shade700,
+                                        size: 16,
+                                      ),
+                                      const SizedBox(width: 8),
+                                      Expanded(
+                                        child: Text(
+                                          'Use your registered credentials to access CEMS',
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            color: Colors.blue.shade700,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
                                 _buildLoginTypeToggle(),
                                 _buildInputField(
                                   controller: _usernameController,
@@ -1345,7 +1839,9 @@ class _EnhancedLoginPageState extends State<EnhancedLoginPage>
                           ),
                         ),
                       ),
-                      const SizedBox(height: 30),
+                      const SizedBox(height: 20),
+                      _buildStatisticsSection(),
+                      const SizedBox(height: 20),
                       _buildFooter(),
                     ],
                   ),

@@ -7,6 +7,7 @@ import 'package:geolocator/geolocator.dart';
 import 'login/auth_service.dart';
 import 'services/image_classifier.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:flutter/foundation.dart';
 import 'dart:io';
 import 'package:path_provider/path_provider.dart';
 import 'package:excel/excel.dart' as excel;
@@ -73,50 +74,89 @@ class TankerDataScreenState extends State<TankerDataScreen> {
     setState(() => _isLoading = true);
 
     try {
-    await _requestPermissions();
+      // Try to request permissions, but continue even if it fails
+      await _requestPermissions();
+      
       if (mounted) {
         setState(() {
           _isInitialized = true;
           _isLoading = false;
         });
-    await _fetchTankerData();
+        
+        // Fetch data after initialization
+        await _fetchTankerData();
       }
     } catch (e) {
+      print('Initialization error: $e');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Error initializing: ${e.toString()}'),
             backgroundColor: Colors.red,
+            duration: const Duration(seconds: 3),
           ),
         );
-        setState(() => _isLoading = false);
+        
+        // Still proceed with initialization even if permissions fail
+        setState(() {
+          _isInitialized = true;
+          _isLoading = false;
+        });
+        
+        // Try to fetch data anyway
+        try {
+          await _fetchTankerData();
+        } catch (fetchError) {
+          print('Data fetch error: $fetchError');
+        }
       }
     }
   }
 
   Future<void> _requestPermissions() async {
-    Map<Permission, PermissionStatus> statuses = await [
-      Permission.camera,
-      Permission.location,
-      Permission.storage,
-    ].request();
-
-    if (statuses[Permission.location]!.isPermanentlyDenied) {
-      _showPermissionError(
-        'Location permission is permanently denied. Please enable it in app settings.',
-        openSettings: true
-      );
-    } else if (statuses[Permission.location]!.isDenied) {
-      _showPermissionError('Location permission is required for tracking tankers');
+    // Skip permission requests for desktop and web platforms
+    if (kIsWeb || Platform.isMacOS || Platform.isWindows || Platform.isLinux) {
+      print('Desktop/Web platform detected - skipping permission requests');
+      return;
     }
+    
+    try {
+      Map<Permission, PermissionStatus> statuses = await [
+        Permission.camera,
+        Permission.location,
+        Permission.storage,
+      ].request();
 
-    if (statuses[Permission.camera]!.isPermanentlyDenied) {
-      _showPermissionError(
-        'Camera permission is permanently denied. Please enable it in app settings.',
-        openSettings: true
-      );
-    } else if (statuses[Permission.camera]!.isDenied) {
-      _showPermissionError('Camera permission is required for taking photos');
+      if (statuses[Permission.location]!.isPermanentlyDenied) {
+        _showPermissionError(
+          'Location permission is permanently denied. Please enable it in app settings.',
+          openSettings: true
+        );
+      } else if (statuses[Permission.location]!.isDenied) {
+        _showPermissionError('Location permission is required for tracking tankers');
+      }
+
+      if (statuses[Permission.camera]!.isPermanentlyDenied) {
+        _showPermissionError(
+          'Camera permission is permanently denied. Please enable it in app settings.',
+          openSettings: true
+        );
+      } else if (statuses[Permission.camera]!.isDenied) {
+        _showPermissionError('Camera permission is required for taking photos');
+      }
+    } catch (e) {
+      // Handle permission plugin errors gracefully
+      print('Permission handler error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Permission system not available. Some features may be limited.'),
+            backgroundColor: Colors.orange,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+      // Continue without permissions for desktop/web platforms
     }
   }
 
@@ -453,108 +493,125 @@ class TankerDataScreenState extends State<TankerDataScreen> {
                 headingRowColor: MaterialStateProperty.all(Colors.grey[100]),
                 sortColumnIndex: _sortColumnIndex,
                 sortAscending: _sortAscending,
+                columnSpacing: 20,
                 columns: [
                   DataColumn(
-                    label: const Text('Vehicle No', style: TextStyle(fontWeight: FontWeight.bold)),
+                    label: const Text('No', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
                     onSort: (columnIndex, ascending) => _sortData(columnIndex, ascending),
                   ),
                   DataColumn(
-                    label: const Text('Capacity (L)', style: TextStyle(fontWeight: FontWeight.bold)),
+                    label: const Text('Date', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                    onSort: (columnIndex, ascending) => _sortData(columnIndex, ascending),
+                  ),
+                  DataColumn(
+                    label: const Text('Tanker Number', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                    onSort: (columnIndex, ascending) => _sortData(columnIndex, ascending),
+                  ),
+                  DataColumn(
+                    label: const Text('Tanker Capacity', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
                     numeric: true,
                     onSort: (columnIndex, ascending) => _sortData(columnIndex, ascending),
                   ),
                   DataColumn(
-                    label: const Text('Driver', style: TextStyle(fontWeight: FontWeight.bold)),
+                    label: const Text('Water Type (Fresh)', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
                     onSort: (columnIndex, ascending) => _sortData(columnIndex, ascending),
                   ),
-                  DataColumn(
-                    label: const Text('Vendor', style: TextStyle(fontWeight: FontWeight.bold)),
-                    onSort: (columnIndex, ascending) => _sortData(columnIndex, ascending),
-                  ),
-                  DataColumn(
-                    label: const Text('Date', style: TextStyle(fontWeight: FontWeight.bold)),
-                    onSort: (columnIndex, ascending) => _sortData(columnIndex, ascending),
-                  ),
-                  const DataColumn(label: Text('Photo', style: TextStyle(fontWeight: FontWeight.bold))),
-                  const DataColumn(label: Text('Actions', style: TextStyle(fontWeight: FontWeight.bold))),
+                  const DataColumn(label: Text('Tanker Photo', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12))),
+                  const DataColumn(label: Text('Fresh water\nloading photo', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12))),
+                  const DataColumn(label: Text('Fresh Water\nunloading Photo', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12))),
+                  const DataColumn(label: Text('water extraction\ncertificate photo', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12))),
+                  const DataColumn(label: Text('Actions', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12))),
                 ],
-                rows: _data.map((item) {
+                rows: _data.asMap().entries.map((entry) {
+                  int index = entry.key + 1;
+                  Map<String, dynamic> item = entry.value;
+                  
                   return DataRow(
                     cells: [
+                      // No (Serial Number)
                       DataCell(
                         Container(
                           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                           decoration: BoxDecoration(
-                            color: Colors.blue[100],
-                            borderRadius: BorderRadius.circular(6),
+                            color: Colors.grey[200],
+                            borderRadius: BorderRadius.circular(4),
                           ),
                           child: Text(
-                            item['plateNumber'] ?? item['vehicle_no'] ?? item['plate_number'] ?? '',
-                            style: const TextStyle(fontWeight: FontWeight.bold),
+                            index.toString(),
+                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
                           ),
                         ),
                       ),
-                      DataCell(
-                        Text(
-                          '${item['capacity']?.toString() ?? ''}L',
-                          style: const TextStyle(color: Colors.cyan),
-                        ),
-                      ),
-                      DataCell(
-                        Text(
-                          item['driverName'] ?? item['driver_name'] ?? 'N/A',
-                          style: TextStyle(color: Colors.grey[700]),
-                        ),
-                      ),
-                      DataCell(
-                        Text(
-                          item['vendor'] ?? 'N/A',
-                          style: TextStyle(color: Colors.grey[700]),
-                        ),
-                      ),
+                      // Date
                       DataCell(
                         Text(
                           _formatDate(item['date']),
-                          style: TextStyle(color: Colors.grey[700]),
+                          style: TextStyle(color: Colors.grey[700], fontSize: 12),
                         ),
                       ),
+                      // Tanker Number
                       DataCell(
-                        (item['photoUrl'] != null || item['photo_url'] != null)
-                            ? IconButton(
-                                icon: Container(
-                                  padding: const EdgeInsets.all(4),
-                                  decoration: BoxDecoration(
-                                    color: Colors.green[100],
-                                    borderRadius: BorderRadius.circular(6),
-                                  ),
-                                  child: const Icon(Icons.photo, color: Colors.green),
-                                ),
-                                onPressed: () => _showPhoto(item['photoUrl'] ?? item['photo_url']),
-                                tooltip: 'View Photo',
-                              )
-                            : Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                                decoration: BoxDecoration(
-                                  color: Colors.orange[100],
-                                  borderRadius: BorderRadius.circular(6),
-                                ),
-                                child: const Text(
-                                  'No photo',
-                                  style: TextStyle(color: Colors.orange, fontSize: 12),
-                                ),
-                              ),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: Colors.blue[100],
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(
+                            item['plateNumber'] ?? item['vehicle_no'] ?? item['plate_number'] ?? '',
+                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                          ),
+                        ),
                       ),
+                      // Tanker Capacity
+                      DataCell(
+                        Text(
+                          '${item['capacity']?.toString() ?? ''}L',
+                          style: const TextStyle(color: Colors.cyan, fontSize: 12),
+                        ),
+                      ),
+                      // Water Type (Fresh)
+                      DataCell(
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: Colors.green[100],
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(
+                            item['water_type'] ?? item['waterType'] ?? 'Fresh',
+                            style: TextStyle(color: Colors.green[700], fontSize: 12, fontWeight: FontWeight.w500),
+                          ),
+                        ),
+                      ),
+                      // Tanker Photo
+                      DataCell(
+                        _buildPhotoCell(item['photoUrl'] ?? item['photo_url'], 'Tanker Photo'),
+                      ),
+                      // Fresh water loading photo
+                      DataCell(
+                        _buildPhotoCell(item['loading_photo_url'] ?? item['loadingPhotoUrl'], 'Loading Photo'),
+                      ),
+                      // Fresh Water unloading Photo
+                      DataCell(
+                        _buildPhotoCell(item['unloading_photo_url'] ?? item['unloadingPhotoUrl'], 'Unloading Photo'),
+                      ),
+                      // Water extraction certificate photo
+                      DataCell(
+                        _buildPhotoCell(item['certificate_photo_url'] ?? item['certificatePhotoUrl'], 'Certificate'),
+                      ),
+                      // Actions
                       DataCell(
                         Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             IconButton(
-                              icon: const Icon(Icons.info, color: Colors.blue),
+                              icon: const Icon(Icons.info, color: Colors.blue, size: 18),
                               onPressed: () => _showTankerDetails(item),
                               tooltip: 'View Details',
                             ),
                             IconButton(
-                              icon: const Icon(Icons.edit, color: Colors.orange),
+                              icon: const Icon(Icons.edit, color: Colors.orange, size: 18),
                               onPressed: () => _editTanker(item),
                               tooltip: 'Edit',
                             ),
@@ -570,6 +627,35 @@ class TankerDataScreenState extends State<TankerDataScreen> {
         ),
       ),
     );
+  }
+
+  Widget _buildPhotoCell(String? photoUrl, String tooltip) {
+    if (photoUrl != null && photoUrl.isNotEmpty) {
+      return IconButton(
+        icon: Container(
+          padding: const EdgeInsets.all(3),
+          decoration: BoxDecoration(
+            color: Colors.green[100],
+            borderRadius: BorderRadius.circular(4),
+          ),
+          child: const Icon(Icons.photo, color: Colors.green, size: 16),
+        ),
+        onPressed: () => _showPhoto(photoUrl),
+        tooltip: 'View $tooltip',
+      );
+    } else {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+        decoration: BoxDecoration(
+          color: Colors.orange[100],
+          borderRadius: BorderRadius.circular(4),
+        ),
+        child: const Text(
+          'No photo',
+          style: TextStyle(color: Colors.orange, fontSize: 10),
+        ),
+      );
+    }
   }
 
   Widget _buildStatCard(String title, String value, IconData icon, Color color) {
@@ -806,12 +892,16 @@ class _AddTankerDialogState extends State<AddTankerDialog> {
   final _vendorController = TextEditingController();
   final _dateController = TextEditingController();
   File? _photoFile;
+  File? _loadingPhotoFile;
+  File? _unloadingPhotoFile;
+  File? _certificatePhotoFile;
   Position? _location;
   bool _isProcessing = false;
   String? _photoError;
   bool _isValidatingImage = false;
   double? _capacity;
   DateTime _selectedDate = DateTime.now();
+  String _waterType = 'Fresh';
 
   @override
   void initState() {
@@ -937,6 +1027,87 @@ class _AddTankerDialogState extends State<AddTankerDialog> {
     }
   }
 
+  Future<void> _takeLoadingPhoto() async {
+    try {
+      final ImagePicker picker = ImagePicker();
+      final XFile? photo = await picker.pickImage(
+        source: ImageSource.camera,
+        maxWidth: 1920,
+        maxHeight: 1080,
+        imageQuality: 85,
+      );
+
+      if (photo != null) {
+        setState(() {
+          _loadingPhotoFile = File(photo.path);
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error taking loading photo: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _takeUnloadingPhoto() async {
+    try {
+      final ImagePicker picker = ImagePicker();
+      final XFile? photo = await picker.pickImage(
+        source: ImageSource.camera,
+        maxWidth: 1920,
+        maxHeight: 1080,
+        imageQuality: 85,
+      );
+
+      if (photo != null) {
+        setState(() {
+          _unloadingPhotoFile = File(photo.path);
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error taking unloading photo: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _takeCertificatePhoto() async {
+    try {
+      final ImagePicker picker = ImagePicker();
+      final XFile? photo = await picker.pickImage(
+        source: ImageSource.camera,
+        maxWidth: 1920,
+        maxHeight: 1080,
+        imageQuality: 85,
+      );
+
+      if (photo != null) {
+        setState(() {
+          _certificatePhotoFile = File(photo.path);
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error taking certificate photo: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
   void _updateCapacity(String vehicleNo) {
     if (vehicleNo.length >= 4) {
       String prefix = vehicleNo.substring(0, 4).toUpperCase();
@@ -992,6 +1163,28 @@ class _AddTankerDialogState extends State<AddTankerDialog> {
         await http.MultipartFile.fromPath('photo', _photoFile!.path),
       );
 
+      // Add additional photos for fresh water tankers
+      if (_loadingPhotoFile != null) {
+        debugPrint('Adding loading photo file: ${_loadingPhotoFile!.path}');
+        request.files.add(
+          await http.MultipartFile.fromPath('loading_photo', _loadingPhotoFile!.path),
+        );
+      }
+
+      if (_unloadingPhotoFile != null) {
+        debugPrint('Adding unloading photo file: ${_unloadingPhotoFile!.path}');
+        request.files.add(
+          await http.MultipartFile.fromPath('unloading_photo', _unloadingPhotoFile!.path),
+        );
+      }
+
+      if (_certificatePhotoFile != null) {
+        debugPrint('Adding certificate photo file: ${_certificatePhotoFile!.path}');
+        request.files.add(
+          await http.MultipartFile.fromPath('certificate_photo', _certificatePhotoFile!.path),
+        );
+      }
+
       final fields = {
         'plateNumber': _vehicleController.text.trim().toUpperCase(),
         'capacity': _capacityController.text.trim(),
@@ -999,6 +1192,7 @@ class _AddTankerDialogState extends State<AddTankerDialog> {
         'driverContact': _driverContactController.text.trim(),
         'vendor': _vendorController.text.trim(),
         'date': _dateController.text.trim(),
+        'waterType': _waterType,
         'lastUpdated': DateTime.now().toIso8601String(),
         'latitude': _location?.latitude.toString() ?? '',
         'longitude': _location?.longitude.toString() ?? '',
@@ -1175,6 +1369,98 @@ class _AddTankerDialogState extends State<AddTankerDialog> {
                 decoration: const InputDecoration(labelText: 'Vendor'),
                 validator: (value) => value?.isEmpty ?? true ? 'Required' : null,
               ),
+              const SizedBox(height: 16),
+              
+              // Fresh Water Photo Section
+              const Text(
+                'Fresh Water Photos',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 8),
+              
+              // Loading Photo
+              Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        ElevatedButton.icon(
+                          onPressed: _takeLoadingPhoto,
+                          icon: const Icon(Icons.camera_alt),
+                          label: Text(_loadingPhotoFile == null ? 'Loading Photo' : 'Retake Loading'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.green[700],
+                            minimumSize: const Size(double.infinity, 40),
+                          ),
+                        ),
+                        if (_loadingPhotoFile != null)
+                          Container(
+                            height: 80,
+                            width: double.infinity,
+                            margin: const EdgeInsets.only(top: 4),
+                            decoration: BoxDecoration(
+                              border: Border.all(color: Colors.grey),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Image.file(_loadingPhotoFile!, fit: BoxFit.cover),
+                          ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        ElevatedButton.icon(
+                          onPressed: _takeUnloadingPhoto,
+                          icon: const Icon(Icons.camera_alt),
+                          label: Text(_unloadingPhotoFile == null ? 'Unloading Photo' : 'Retake Unloading'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.orange[700],
+                            minimumSize: const Size(double.infinity, 40),
+                          ),
+                        ),
+                        if (_unloadingPhotoFile != null)
+                          Container(
+                            height: 80,
+                            width: double.infinity,
+                            margin: const EdgeInsets.only(top: 4),
+                            decoration: BoxDecoration(
+                              border: Border.all(color: Colors.grey),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Image.file(_unloadingPhotoFile!, fit: BoxFit.cover),
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              
+              // Certificate Photo
+              ElevatedButton.icon(
+                onPressed: _takeCertificatePhoto,
+                icon: const Icon(Icons.verified),
+                label: Text(_certificatePhotoFile == null ? 'Water Extraction Certificate' : 'Retake Certificate'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.purple[700],
+                  minimumSize: const Size(double.infinity, 40),
+                ),
+              ),
+              if (_certificatePhotoFile != null)
+                Container(
+                  height: 100,
+                  width: double.infinity,
+                  margin: const EdgeInsets.only(top: 8),
+                  decoration: BoxDecoration(
+                    border: Border.all(color: Colors.grey),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Image.file(_certificatePhotoFile!, fit: BoxFit.cover),
+                ),
               const SizedBox(height: 16),
               if (_location != null)
                 Padding(

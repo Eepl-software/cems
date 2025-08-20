@@ -50,18 +50,46 @@ class AirQualityData {
   }
 }
 
-// Air Quality Service
+// Air Quality Service with OpenWeather fallback
 class AirQualityService {
-  static const String _apiKey = 'AIzaSyAXZVf--EUHLe3IfUe_G-8Z5YZoIFPT2l4';
-  static const String _baseUrl = 'https://airquality.googleapis.com/v1/currentConditions:lookup';
+  static const String _googleApiKey = 'AIzaSyAXZVf--EUHLe3IfUe_G-8Z5YZoIFPT2l4';
+  static const String _googleBaseUrl = 'https://airquality.googleapis.com/v1/currentConditions:lookup';
+  static const String _openWeatherApiKey = 'e95f2f59c1e7c46ed4d7afb74896bb82';
+  static const String _openWeatherBaseUrl = 'http://api.openweathermap.org/data/2.5/air_pollution';
 
   static Future<AirQualityData?> getAirQualityData({
     required double latitude,
     required double longitude,
   }) async {
+    // Try Google API first
+    print('Trying Google Air Quality API...');
+    var data = await _getGoogleAirQualityData(latitude: latitude, longitude: longitude);
+    
+    if (data != null && (data.pm25 > 0 || data.pm10 > 0 || data.so2 > 0)) {
+      print('Google API succeeded');
+      return data;
+    }
+    
+    // If Google API fails, try OpenWeather API
+    print('Google API failed, trying OpenWeather API...');
+    data = await _getOpenWeatherAirQualityData(latitude: latitude, longitude: longitude);
+    
+    if (data != null) {
+      print('OpenWeather API succeeded');
+      return data;
+    }
+    
+    print('Both APIs failed');
+    return null;
+  }
+
+  static Future<AirQualityData?> _getGoogleAirQualityData({
+    required double latitude,
+    required double longitude,
+  }) async {
     try {
       final response = await http.post(
-        Uri.parse('$_baseUrl?key=$_apiKey'),
+        Uri.parse('$_googleBaseUrl?key=$_googleApiKey'),
         headers: {
           'Content-Type': 'application/json',
         },
@@ -81,13 +109,72 @@ class AirQualityService {
         final data = jsonDecode(response.body);
         return AirQualityData.fromJson(data);
       } else {
-        print('API Error: ${response.statusCode} - ${response.body}');
+        print('Google API Error: ${response.statusCode} - ${response.body}');
         return null;
       }
     } catch (e) {
-      print('Error fetching air quality data: $e');
+      print('Error fetching Google air quality data: $e');
       return null;
     }
+  }
+
+  static Future<AirQualityData?> _getOpenWeatherAirQualityData({
+    required double latitude,
+    required double longitude,
+  }) async {
+    try {
+      final response = await http.get(
+        Uri.parse('$_openWeatherBaseUrl?lat=$latitude&lon=$longitude&appid=$_openWeatherApiKey'),
+      );
+
+      print('OpenWeather Response status: ${response.statusCode}');
+      print('OpenWeather Response body: ${response.body}');
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        return _parseOpenWeatherData(data, latitude, longitude);
+      } else {
+        print('OpenWeather API Error: ${response.statusCode} - ${response.body}');
+        return null;
+      }
+    } catch (e) {
+      print('Error fetching OpenWeather air quality data: $e');
+      return null;
+    }
+  }
+
+  static AirQualityData _parseOpenWeatherData(Map<String, dynamic> json, double lat, double lon) {
+    double pm25Value = 0;
+    double pm10Value = 0;
+    double so2Value = 0;
+    int aqiValue = 0;
+
+    try {
+      if (json.containsKey('list') && json['list'] is List && json['list'].isNotEmpty) {
+        final current = json['list'][0];
+        
+        if (current.containsKey('main') && current['main'].containsKey('aqi')) {
+          aqiValue = current['main']['aqi'];
+        }
+        
+        if (current.containsKey('components')) {
+          final components = current['components'];
+          pm25Value = (components['pm2_5'] ?? 0).toDouble();
+          pm10Value = (components['pm10'] ?? 0).toDouble();
+          so2Value = (components['so2'] ?? 0).toDouble();
+        }
+      }
+    } catch (e) {
+      print('Error parsing OpenWeather data: $e');
+    }
+
+    return AirQualityData(
+      pm25: pm25Value,
+      pm10: pm10Value,
+      so2: so2Value,
+      overallAqi: aqiValue,
+      location: 'Lat: ${lat.toStringAsFixed(2)}, Lon: ${lon.toStringAsFixed(2)}',
+    );
   }
 
   static Future<Position?> getCurrentLocation() async {
@@ -120,7 +207,7 @@ class AirQualityService {
 // Helper functions
 class AirQualityHelper {
   static String getQualityComment(double value, String pollutant) {
-    switch (pollutant.toLowerCase()) {
+    switch (pollutant.toLowerCase().replaceAll(' ', '').replaceAll('.', '')) {
       case 'pm25':
         if (value <= 12) return 'Good';
         if (value <= 35) return 'Moderate';
@@ -137,7 +224,7 @@ class AirQualityHelper {
         if (value <= 380) return 'Poor';
         return 'Critical';
       default:
-        return 'Unknown';
+        return 'Good';
     }
   }
 
@@ -157,9 +244,9 @@ class AirQualityHelper {
   }
 
   static String getStandardValue(String pollutant) {
-    switch (pollutant.toLowerCase()) {
+    switch (pollutant.toLowerCase().replaceAll(' ', '').replaceAll('.', '')) {
       case 'pm25':
-        return '25 µg/m³';
+        return '35 µg/m³';
       case 'pm10':
         return '50 µg/m³';
       case 'so2':
@@ -427,7 +514,7 @@ class _AirQualityWidgetState extends State<AirQualityWidget> {
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
               decoration: BoxDecoration(
-                color: color.withOpacity(0.2),
+                color: color.withValues(alpha: 0.2),
                 borderRadius: BorderRadius.circular(4),
               ),
               child: Text(
@@ -447,7 +534,7 @@ class _AirQualityWidgetState extends State<AirQualityWidget> {
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
               decoration: BoxDecoration(
-                color: color.withOpacity(0.2),
+                color: color.withValues(alpha: 0.2),
                 borderRadius: BorderRadius.circular(4),
               ),
               child: Text(

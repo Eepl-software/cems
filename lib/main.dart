@@ -20,7 +20,21 @@ import 'dart:math' as math;
 import 'package:fl_chart/fl_chart.dart';
 
 // Add at the top of the file (after imports)
-const String baseUrl = 'http://54.146.215.18:3000'; 
+const String baseUrl = 'http://54.146.215.18:3000';
+
+// Safe parsing helper function
+double safeParseDouble(dynamic value) {
+  if (value == null) return 0.0;
+  if (value is double) return value;
+  if (value is int) return value.toDouble();
+  if (value is String) {
+    final cleanValue = value.toString().trim();
+    if (cleanValue.isEmpty) return 0.0;
+    return double.tryParse(cleanValue) ?? 0.0;
+  }
+  if (value is num) return value.toDouble();
+  return 0.0;
+} 
 
 class ProjectDocument {
   final String id;
@@ -80,7 +94,7 @@ class ProjectDocument {
       status: json['status'] ?? 'Active',
       description: json['description'] ?? '',
       tags: List<String>.from(json['tags'] ?? []),
-      fileSize: json['fileSize']?.toDouble(),
+      fileSize: safeParseDouble(json['fileSize']),
       isAsset: json['isAsset'] ?? false,
     );
   }
@@ -208,9 +222,9 @@ class EnhancedProjectDocument {
       fileType: json['file_type'] ?? json['fileType'],
       projectName: json['project_name'],
       projectAddress: json['project_address'],
-      builtUpArea: json['built_up_area']?.toDouble(),
-      plotArea: json['plot_area']?.toDouble(),
-      floorAreaRatio: json['floor_area_ratio']?.toDouble(),
+      builtUpArea: safeParseDouble(json['built_up_area']),
+      plotArea: safeParseDouble(json['plot_area']),
+      floorAreaRatio: safeParseDouble(json['floor_area_ratio']),
       issuingAuthority: json['issuing_authority'],
       approvalNumber: json['approval_number'],
       applicationNumber: json['application_number'],
@@ -443,7 +457,7 @@ class _EnhancedApprovalsPageState extends State<EnhancedApprovalsPage>
 
   PreferredSizeWidget _buildAppBar() {
     return AppBar(
-      title: const Text('Smart Document Manager',
+      title: const Text('Project Document Manager',
           style: TextStyle(fontWeight: FontWeight.bold)),
       backgroundColor: Colors.teal,
       elevation: 0,

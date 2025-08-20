@@ -1,6 +1,6 @@
-# learningdart
+# CEMS - Construction & Environmental Management System
 
-A new Flutter project.
+A comprehensive Flutter application for managing construction and environmental monitoring.
 
 ## Getting Started
 

@@ -330,7 +330,7 @@ class _SolidWastePageState extends State<SolidWastePage> with SingleTickerProvid
                 child: const Icon(
                   Icons.eco_rounded,
                   color: Colors.white,
-                  size: 32,
+                  size: 28,
                 ),
               ),
             ],

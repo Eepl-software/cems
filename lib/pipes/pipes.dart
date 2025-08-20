@@ -33,17 +33,22 @@ class _PipesPageState extends State<PipesPage> with TickerProviderStateMixin {
   
   // Enhanced OCR field controllers
   final TextEditingController _materialNameController = TextEditingController();
-  final TextEditingController _materialCategoryController = TextEditingController();
-  final TextEditingController _weighmentSlipNoController = TextEditingController();
   final TextEditingController _driverNameController = TextEditingController();
-  final TextEditingController _transporterController = TextEditingController();
   
   // State variables
   File? _selectedImage;
   File? _selectedLicense;
+  File? _vehiclePhotoFile;
+  File? _vendorLicenseFile;
+  String? _vehiclePhotoUrl;
+  String? _vendorLicenseUrl;
   bool _isProcessing = false;
   bool _isUploadingLicense = false;
   bool _isLicenseUploaded = false;
+  bool _isUploadingVehiclePhoto = false;
+  bool _isUploadingVendorLicense = false;
+  bool _isVehiclePhotoUploaded = false;
+  bool _isVendorLicenseUploaded = false;
   String? _errorMessage;
   Position? _currentLocation;
   
@@ -90,10 +95,7 @@ class _PipesPageState extends State<PipesPage> with TickerProviderStateMixin {
     _contactController.dispose();
     // Enhanced OCR controllers
     _materialNameController.dispose();
-    _materialCategoryController.dispose();
-    _weighmentSlipNoController.dispose();
     _driverNameController.dispose();
-    _transporterController.dispose();
     super.dispose();
   }
 
@@ -171,25 +173,19 @@ class _PipesPageState extends State<PipesPage> with TickerProviderStateMixin {
     final List<Map<String, String>> mockDataOptions = [
       {
         'material_name': 'PVC PIPES',
-        'material_category': '110mm SWR',
         'gross_weight': '18630 KG',
         'tare_weight': '5400 KG',
         'net_weight': '13230 KG',
-        'weighment_slip_no': 'WB48R20250715151234-7',
         'vehicle_number': 'KA05CD8901',
         'driver_name': 'rajesh',
-        'transporter': 'pipe solutions pvt ltd',
       },
       {
         'material_name': 'STEEL PIPES',
-        'material_category': '2 inch MS',
         'gross_weight': '32180 KG',
         'tare_weight': '8500 KG',
         'net_weight': '23680 KG',
-        'weighment_slip_no': 'WB48R20250715162345-8',
         'vehicle_number': 'TN12EF4567',
         'driver_name': 'murali',
-        'transporter': 'steel pipe industries',
       }
     ];
 
@@ -205,10 +201,7 @@ class _PipesPageState extends State<PipesPage> with TickerProviderStateMixin {
       
       // Enhanced OCR fields
       _materialNameController.text = mockData['material_name']!;
-      _materialCategoryController.text = mockData['material_category']!;
-      _weighmentSlipNoController.text = mockData['weighment_slip_no']!;
       _driverNameController.text = mockData['driver_name']!;
-      _transporterController.text = mockData['transporter']!;
     });
   }
 
@@ -258,10 +251,7 @@ class _PipesPageState extends State<PipesPage> with TickerProviderStateMixin {
             
             // Enhanced OCR fields
             _materialNameController.text = extractedData['material_name'] ?? '';
-            _materialCategoryController.text = extractedData['material_category'] ?? '';
-            _weighmentSlipNoController.text = extractedData['weighment_slip_no'] ?? '';
             _driverNameController.text = extractedData['driver_name'] ?? '';
-            _transporterController.text = extractedData['transporter'] ?? '';
           });
           
           _showSuccessSnackBar('Weighbridge slip data extracted successfully!');
@@ -407,10 +397,9 @@ class _PipesPageState extends State<PipesPage> with TickerProviderStateMixin {
       'timestamp': DateTime.now().toIso8601String(),
       // Enhanced OCR fields
       'material_name': _materialNameController.text,
-      'material_category': _materialCategoryController.text,
-      'weighment_slip_no': _weighmentSlipNoController.text,
       'driver_name': _driverNameController.text,
-      'transporter': _transporterController.text,
+      'vehicle_photo_url': _vehiclePhotoUrl,
+      'vendor_license_photo_url': _vendorLicenseUrl,
     };
 
     final response = await http.post(
@@ -433,10 +422,7 @@ class _PipesPageState extends State<PipesPage> with TickerProviderStateMixin {
     _contactController.clear();
     // Clear enhanced OCR fields
     _materialNameController.clear();
-    _materialCategoryController.clear();
-    _weighmentSlipNoController.clear();
     _driverNameController.clear();
-    _transporterController.clear();
     setState(() {
       _selectedImage = null;
       _selectedLicense = null;
@@ -832,14 +818,13 @@ class _PipesPageState extends State<PipesPage> with TickerProviderStateMixin {
                 // Enhanced OCR fields
                 if (submission['material_name'] != null && submission['material_name'].toString().isNotEmpty)
                   _buildDetailRow('Material Name', submission['material_name']),
-                if (submission['material_category'] != null && submission['material_category'].toString().isNotEmpty)
-                  _buildDetailRow('Material Category', submission['material_category']),
-                if (submission['weighment_slip_no'] != null && submission['weighment_slip_no'].toString().isNotEmpty)
-                  _buildDetailRow('Weighment Slip No', submission['weighment_slip_no']),
                 if (submission['driver_name'] != null && submission['driver_name'].toString().isNotEmpty)
                   _buildDetailRow('Driver Name (OCR)', submission['driver_name']),
-                if (submission['transporter'] != null && submission['transporter'].toString().isNotEmpty)
-                  _buildDetailRow('Transporter', submission['transporter']),
+                // Photo URLs
+                if (submission['vehicle_photo_url'] != null && submission['vehicle_photo_url'].toString().isNotEmpty)
+                  _buildPhotoRow('Vehicle Photo', submission['vehicle_photo_url']),
+                if (submission['vendor_license_photo_url'] != null && submission['vendor_license_photo_url'].toString().isNotEmpty)
+                  _buildPhotoRow('Vendor License', submission['vendor_license_photo_url']),
                 _buildDetailRow('Latitude', submission['latitude']),
                 _buildDetailRow('Longitude', submission['longitude']),
                 _buildDetailRow('Submitted At', submission['created_at']),
@@ -873,6 +858,79 @@ class _PipesPageState extends State<PipesPage> with TickerProviderStateMixin {
           Expanded(
             child: Text(value?.toString() ?? 'N/A'),
           ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPhotoRow(String label, String? photoUrl) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '$label:',
+            style: const TextStyle(fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 4),
+          if (photoUrl != null && photoUrl.isNotEmpty)
+            Container(
+              height: 150,
+              width: double.infinity,
+              decoration: BoxDecoration(
+                border: Border.all(color: Colors.grey),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: photoUrl.startsWith('http')
+                    ? Image.network(
+                        photoUrl,
+                        fit: BoxFit.cover,
+                        errorBuilder: (context, error, stackTrace) {
+                          return Container(
+                            color: Colors.grey[200],
+                            child: const Center(
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(Icons.error, color: Colors.red),
+                                  Text('Failed to load image'),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                        loadingBuilder: (context, child, loadingProgress) {
+                          if (loadingProgress == null) return child;
+                          return Container(
+                            color: Colors.grey[200],
+                            child: const Center(
+                              child: CircularProgressIndicator(),
+                            ),
+                          );
+                        },
+                      )
+                    : Container(
+                        color: Colors.grey[200],
+                        child: const Center(
+                          child: Text('Invalid photo URL'),
+                        ),
+                      ),
+              ),
+            )
+          else
+            Container(
+              height: 50,
+              decoration: BoxDecoration(
+                color: Colors.grey[200],
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Center(
+                child: Text('No photo available'),
+              ),
+            ),
         ],
       ),
     );
@@ -1215,38 +1273,6 @@ class _PipesPageState extends State<PipesPage> with TickerProviderStateMixin {
               },
             ),
             const SizedBox(height: 16),
-            TextFormField(
-              controller: _materialCategoryController,
-              decoration: const InputDecoration(
-                labelText: 'Material Category',
-                prefixIcon: Icon(Icons.category),
-                border: OutlineInputBorder(),
-              ),
-              keyboardType: TextInputType.text,
-              validator: (value) {
-                if (value == null || value.isEmpty) {
-                  return 'Material category is required';
-                }
-                return null;
-              },
-            ),
-            const SizedBox(height: 16),
-            TextFormField(
-              controller: _weighmentSlipNoController,
-              decoration: const InputDecoration(
-                labelText: 'Weighment Slip Number',
-                prefixIcon: Icon(Icons.confirmation_number),
-                border: OutlineInputBorder(),
-              ),
-              keyboardType: TextInputType.text,
-              validator: (value) {
-                if (value == null || value.isEmpty) {
-                  return 'Weighment slip number is required';
-                }
-                return null;
-              },
-            ),
-            const SizedBox(height: 16),
             Row(
               children: [
                 Expanded(
@@ -1261,24 +1287,6 @@ class _PipesPageState extends State<PipesPage> with TickerProviderStateMixin {
                     validator: (value) {
                       if (value == null || value.isEmpty) {
                         return 'Driver name is required';
-                      }
-                      return null;
-                    },
-                  ),
-                ),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: TextFormField(
-                    controller: _transporterController,
-                    decoration: const InputDecoration(
-                      labelText: 'Transporter',
-                      prefixIcon: Icon(Icons.local_shipping),
-                      border: OutlineInputBorder(),
-                    ),
-                    keyboardType: TextInputType.text,
-                    validator: (value) {
-                      if (value == null || value.isEmpty) {
-                        return 'Transporter is required';
                       }
                       return null;
                     },
@@ -1744,27 +1752,33 @@ class _PipesPageState extends State<PipesPage> with TickerProviderStateMixin {
     return Card(
       elevation: 4,
       child: Padding(
-        padding: const EdgeInsets.all(16.0),
+        padding: const EdgeInsets.all(12.0),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 32, color: color),
-            const SizedBox(height: 8),
+            Icon(icon, size: 28, color: color),
+            const SizedBox(height: 6),
             Text(
               value,
               style: TextStyle(
-                fontSize: 20,
+                fontSize: 18,
                 fontWeight: FontWeight.bold,
                 color: color,
               ),
             ),
-            Text(
-              title,
-              style: const TextStyle(
-                fontSize: 12,
-                color: Colors.grey,
+            const SizedBox(height: 2),
+            Flexible(
+              child: Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 11,
+                  color: Colors.grey,
+                ),
+                textAlign: TextAlign.center,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
               ),
-              textAlign: TextAlign.center,
             ),
           ],
         ),
@@ -1809,7 +1823,7 @@ class _PipesPageState extends State<PipesPage> with TickerProviderStateMixin {
                 cells: [
                   DataCell(Text(submission['date'] ?? 'N/A')),
                   DataCell(Text(submission['vehicle_number'] ?? 'N/A')),
-                  DataCell(Text(submission['material_category'] ?? 'Pipes')),
+                  DataCell(Text('Pipes')),
                   DataCell(Text(submission['driver_number'] ?? 'N/A')),
                   DataCell(Text(submission['gross_weight'] ?? 'N/A')),
                   DataCell(Text(submission['net_weight'] ?? 'N/A')),

@@ -76,37 +76,33 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
-
-# flutter_icons:
-#   android: true
-#   ios: true
-#   image_path: "assets/prestigelogo.png"
-
-
+  
+  # To add assets to your application, add an assets section:
   assets:
-    - assets/prestigelogo.png
-    - assets/iisclogo.png
-    - assets/L&T.png
-    - assets/ BESCOM.pdf
-    - assets/Airport.pdf
-    - assets/Borewell Approval.pdf
-    - assets/cfe.pdf
-    - assets/cfe1.pdf
-    - assets/Conversion Certificate.pdf
-    - assets/ENvironmental.pdf
-    - assets/FIRE_NOC.pdf
-    - assets/SGWA.pdf
-    - assets/Borewell_water.xlsx
-    - assets/Tanker_water.xlsx
-    # - assets/Air_pollution.xlsx
-    - assets/Prestige.jpeg
-    - assets/IISC_logo.jpeg
-    - assets/Tanker_water.xlsx
-    - assets/goi.png
-    - assets/GOK.png
-    - assets/KSPCB.png
-    - assets/logo.png
-    - assets/FoxCon Logo.png
-    - assets/Kalpar logo.png
-    - assets/clean Tech.png
+    - assets/Kalpar_logo.png
+    - assets/iisc_logo.png
+    - assets/LT.png
+    - assets/prestige_logo.png
+    - assets/a.png
+    - assets/b.png
+    - assets/c.png
+    - assets/d.png
+    - assets/e.png
+    - assets/f.png
+    - assets/g.png
+    - assets/h.png
+    - assets/i.png
+
+
+
+
+
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/app_icon.png"
+  min_sdk_android: 21
+  adaptive_icon_background: "#37474F" # Dark blue-gray from Kalpar logo
+  adaptive_icon_foreground: "assets/app_icon.png"
   

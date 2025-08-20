@@ -4,9 +4,13 @@ import 'package:intl/intl.dart';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:fl_chart/fl_chart.dart';
-import 'package:flutter_svg/flutter_svg.dart';
 import 'package:shimmer/shimmer.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:cached_network_image/cached_network_image.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:geocoding/geocoding.dart';
+import 'dart:io';
 
 const String baseUrl = 'http://54.146.215.18:3000';
 
@@ -24,6 +28,8 @@ class _CDWasteDetailsPageState extends State<CDWasteDetailsPage> with SingleTick
   // State variables
   bool _isLoading = false;
   bool _isRefreshing = false;
+  bool _isLoadingConfig = true;
+  Map<String, dynamic> _dynamicConfig = {};
   
   // Waste calculation state
   final _formKey = GlobalKey<FormState>();
@@ -43,25 +49,14 @@ class _CDWasteDetailsPageState extends State<CDWasteDetailsPage> with SingleTick
   List<DailyWaste> _dailyWasteRecords = [];
   Map<String, double> _wasteByCategoryData = {};
   
-  // Construction types
-  final List<String> _constructionTypes = [
-    'Residential',
-    'Commercial',
-    'Industrial',
-    'Infrastructure',
-    'Renovation',
-    'Demolition'
-  ];
-  
-  // Waste coefficients by construction type (kg/m²)
-  final Map<String, double> _wasteCoefficients = {
-    'Residential': 21.0,
-    'Commercial': 18.5,
-    'Industrial': 25.0,
-    'Infrastructure': 15.0,
-    'Renovation': 12.5,
-    'Demolition': 30.0,
-  };
+  // Dynamic configuration
+  List<String> _constructionTypes = [];
+  Map<String, double> _wasteCoefficients = {};
+  Map<String, dynamic> _wasteCategories = {};
+  List<String> _storageMethods = [];
+  List<String> _disposalMethods = [];
+  List<String> _wasteTypes = [];
+  Map<String, dynamic> _thresholds = {};
   
   // Analytics data
   double _averageWastePerDay = 0;
@@ -73,7 +68,7 @@ class _CDWasteDetailsPageState extends State<CDWasteDetailsPage> with SingleTick
     _tabController = TabController(length: 3, vsync: this);
     _tabController.addListener(_handleTabSelection);
     _loadSavedFormData();
-    _fetchInitialData();
+    _fetchDynamicConfig();
   }
   
   void _handleTabSelection() {
@@ -126,6 +121,55 @@ class _CDWasteDetailsPageState extends State<CDWasteDetailsPage> with SingleTick
   }
   
   // API Calls
+  Future<void> _fetchDynamicConfig() async {
+    try {
+      final response = await http.get(Uri.http('54.146.215.18:3000', '/cd-waste/config'));
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        setState(() {
+          _dynamicConfig = data['config'];
+          _constructionTypes = List<String>.from(_dynamicConfig['constructionTypes'] ?? []);
+          _wasteCoefficients = Map<String, double>.from(
+            (_dynamicConfig['wasteCoefficients'] ?? {}).map((k, v) => MapEntry(k, v.toDouble()))
+          );
+          _wasteCategories = Map<String, dynamic>.from(_dynamicConfig['wasteCategories'] ?? {});
+          _storageMethods = List<String>.from(_dynamicConfig['storageMethods'] ?? []);
+          _disposalMethods = List<String>.from(_dynamicConfig['disposalMethods'] ?? []);
+          _wasteTypes = List<String>.from(_dynamicConfig['wasteTypes'] ?? []);
+          _thresholds = Map<String, dynamic>.from(_dynamicConfig['thresholds'] ?? {});
+          _isLoadingConfig = false;
+        });
+        _fetchInitialData();
+      } else {
+        // Fallback to default values
+        _setDefaultConfig();
+        _fetchInitialData();
+      }
+    } catch (e) {
+      print('Error fetching dynamic config: $e');
+      _setDefaultConfig();
+      _fetchInitialData();
+    }
+  }
+
+  void _setDefaultConfig() {
+    setState(() {
+      _constructionTypes = ['Residential', 'Commercial', 'Industrial', 'Infrastructure', 'Renovation', 'Demolition'];
+      _wasteCoefficients = {
+        'Residential': 21.0,
+        'Commercial': 18.5,
+        'Industrial': 25.0,
+        'Infrastructure': 15.0,
+        'Renovation': 12.5,
+        'Demolition': 30.0,
+      };
+      _storageMethods = ['On-site Container', 'Segregated Bins', 'Temporary Storage Area'];
+      _disposalMethods = ['Recycling Facility', 'Landfill', 'Reuse on Site'];
+      _wasteTypes = ['Mixed C&D Waste', 'Concrete Debris', 'Wood Waste'];
+      _isLoadingConfig = false;
+    });
+  }
+  
   Future<void> _fetchInitialData() async {
     setState(() => _isLoading = true);
     try {
@@ -214,28 +258,30 @@ class _CDWasteDetailsPageState extends State<CDWasteDetailsPage> with SingleTick
   
   void _calculateWasteByCategory() {
     // Reset data
-    _wasteByCategoryData = {
-      'Concrete': 0.0,
-      'Wood': 0.0, 
-      'Metal': 0.0,
-      'Glass': 0.0,
-      'Plastic': 0.0,
-      'Others': 0.0,
-    };
+    _wasteByCategoryData = {};
     
     _disposalMethodsData = {};
     
-    // Calculate total waste by category (using a simple distribution model)
+    // Calculate total waste by category using dynamic percentages
     double totalWaste = _dailyWasteRecords.fold(0.0, 
       (sum, record) => sum + record.quantity);
     
-    if (totalWaste > 0) {
-      _wasteByCategoryData['Concrete'] = totalWaste * 0.40; // 40% concrete
-      _wasteByCategoryData['Wood'] = totalWaste * 0.20;     // 20% wood
-      _wasteByCategoryData['Metal'] = totalWaste * 0.15;    // 15% metal
-      _wasteByCategoryData['Glass'] = totalWaste * 0.10;    // 10% glass
-      _wasteByCategoryData['Plastic'] = totalWaste * 0.05;  // 5% plastic
-      _wasteByCategoryData['Others'] = totalWaste * 0.10;   // 10% others
+    if (totalWaste > 0 && _wasteCategories.isNotEmpty) {
+      // Use dynamic waste categories from config
+      _wasteCategories.forEach((category, details) {
+        final percentage = (details['percentage'] ?? 0) / 100.0;
+        _wasteByCategoryData[category] = totalWaste * percentage;
+      });
+    } else if (totalWaste > 0) {
+      // Fallback to default distribution
+      _wasteByCategoryData = {
+        'Concrete': totalWaste * 0.40,
+        'Wood': totalWaste * 0.20,
+        'Metal': totalWaste * 0.15,
+        'Glass': totalWaste * 0.10,
+        'Plastic': totalWaste * 0.05,
+        'Others': totalWaste * 0.10,
+      };
     }
     
     // Calculate disposal methods data
@@ -266,18 +312,23 @@ class _CDWasteDetailsPageState extends State<CDWasteDetailsPage> with SingleTick
     setState(() => _isLoading = true);
     try {
       final projectArea = double.tryParse(_projectAreaController.text) ?? 0.0;
-      // Use correct formula: 50kg per sq ft
-      final wasteAmount = projectArea * 50;
+      // Use dynamic formula from config or default
+      final factor = _dynamicConfig['calculationFormula']?['factor'] ?? 50;
+      final wasteAmount = projectArea * factor;
 
       final response = await http.post(
-        Uri.http('54.146.215.18:3000', '/waste-calculations'),
+        Uri.http('54.146.215.18:3000', '/cd-waste'),
         headers: {'Content-Type': 'application/json'},
         body: json.encode({
           'project_area': projectArea,
-          'start_date': _startDate?.toIso8601String(),
-          'end_date': _endDate?.toIso8601String(),
-          'waste_amount': wasteAmount,
-          'calculation_date': DateTime.now().toIso8601String(),
+          'project_name': _projectNameController.text,
+          'construction_type': _selectedConstructionType,
+          'date': DateTime.now().toIso8601String().split('T')[0], // Send as date only
+          'waste_type': 'Mixed C&D Waste', // Default value
+          'disposal_method': 'To be determined', // Default value
+          'reuse_recycling_details': '',
+          'location': '',
+          'contractor_name': '',
         }),
       );
 
@@ -295,6 +346,64 @@ class _CDWasteDetailsPageState extends State<CDWasteDetailsPage> with SingleTick
     }
   }
   
+  Future<void> _addDailyWasteWithPhotos(DailyWaste waste, {File? loadingPhoto, File? unloadingPhoto, File? vendorLicensePhoto}) async {
+    setState(() => _isLoading = true);
+    try {
+      var request = http.MultipartRequest(
+        'POST',
+        Uri.http('54.146.215.18:3000', '/daily-waste'),
+      );
+
+      // Add form fields
+      request.fields['date'] = DateFormat('yyyy-MM-dd').format(waste.date);
+      request.fields['quantity_kg'] = waste.quantity.toString();
+      request.fields['mode_of_storage'] = waste.modeOfStorage;
+      request.fields['mode_of_disposal'] = waste.modeOfDisposal;
+      request.fields['waste_type'] = waste.wasteType;
+      request.fields['notes'] = waste.notes;
+      request.fields['location'] = waste.location;
+      request.fields['latitude'] = waste.latitude?.toString() ?? '';
+      request.fields['longitude'] = waste.longitude?.toString() ?? '';
+
+      // Add photo files if they exist
+      if (loadingPhoto != null) {
+        request.files.add(await http.MultipartFile.fromPath(
+          'loading_photo',
+          loadingPhoto.path,
+        ));
+      }
+      
+      if (unloadingPhoto != null) {
+        request.files.add(await http.MultipartFile.fromPath(
+          'unloading_photo',
+          unloadingPhoto.path,
+        ));
+      }
+      
+      if (vendorLicensePhoto != null) {
+        request.files.add(await http.MultipartFile.fromPath(
+          'vendor_license_photo',
+          vendorLicensePhoto.path,
+        ));
+      }
+
+      final streamedResponse = await request.send();
+      final response = await http.Response.fromStream(streamedResponse);
+
+      if (response.statusCode == 201) {
+        _showSuccess('Daily waste record added successfully');
+        await _fetchDailyWasteRecords();
+        _processAnalyticsData();
+      } else {
+        throw Exception('Failed to add waste record: ${response.reasonPhrase}');
+      }
+    } catch (e) {
+      _showError('Error: ${e.toString()}');
+    } finally {
+      setState(() => _isLoading = false);
+    }
+  }
+
   Future<void> _addDailyWaste(DailyWaste waste) async {
     setState(() => _isLoading = true);
     try {
@@ -438,7 +547,10 @@ class _CDWasteDetailsPageState extends State<CDWasteDetailsPage> with SingleTick
     showDialog(
       context: context,
       builder: (context) => AddWasteDialog(
-        onSubmit: _addDailyWaste,
+        onSubmit: _addDailyWasteWithPhotos,
+        storageMethods: _storageMethods,
+        disposalMethods: _disposalMethods,
+        wasteTypes: _wasteTypes,
       ),
     );
   }
@@ -627,14 +739,25 @@ class _CDWasteDetailsPageState extends State<CDWasteDetailsPage> with SingleTick
   }
   
   Widget _buildComponentsCard() {
-    final wasteComponents = [
-      {'icon': Icons.business, 'name': 'Concrete Waste', 'percentage': '40%'},
-      {'icon': Icons.forest, 'name': 'Wood Waste', 'percentage': '20%'},
-      {'icon': Icons.iron, 'name': 'Metal Scrap', 'percentage': '15%'},
-      {'icon': Icons.grid_4x4, 'name': 'Glass & Ceramic', 'percentage': '10%'},
-      {'icon': Icons.inventory_2, 'name': 'Plastics & Packaging', 'percentage': '5%'},
-      {'icon': Icons.question_mark, 'name': 'Other Materials', 'percentage': '10%'},
-    ];
+    final iconMap = {
+      'Concrete': Icons.business,
+      'Wood': Icons.forest,
+      'Metal': Icons.iron,
+      'Glass': Icons.grid_4x4,
+      'Plastic': Icons.inventory_2,
+      'Others': Icons.question_mark,
+    };
+
+    final wasteComponents = _wasteCategories.entries.map((entry) {
+      final category = entry.key;
+      final details = entry.value as Map<String, dynamic>;
+      return {
+        'icon': iconMap[category] ?? Icons.circle,
+        'name': '$category Waste',
+        'percentage': '${details['percentage'] ?? 0}%',
+        'recyclable': details['recyclable'] ?? 0,
+      };
+    }).toList();
     
     return Card(
       child: Padding(
@@ -1304,7 +1427,7 @@ class _CDWasteDetailsPageState extends State<CDWasteDetailsPage> with SingleTick
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
             child: DataTable(
-              headingRowColor: MaterialStateProperty.all(const Color(0xFFE0F2F1)),
+              headingRowColor: WidgetStateProperty.all(const Color(0xFFE0F2F1)),
               columns: const [
                 DataColumn(label: Text('Date', style: TextStyle(fontWeight: FontWeight.bold))),
                 DataColumn(label: Text('Project', style: TextStyle(fontWeight: FontWeight.bold))),
@@ -1461,14 +1584,17 @@ class _CDWasteDetailsPageState extends State<CDWasteDetailsPage> with SingleTick
                   Wrap(
                     spacing: 16,
                     runSpacing: 8,
-                    children: [
-                      _buildCategoryIndicator('Concrete', const Color(0xFF1E88E5)),
-                      _buildCategoryIndicator('Wood', const Color(0xFF43A047)),
-                      _buildCategoryIndicator('Metal', const Color(0xFFFFB300)),
-                      _buildCategoryIndicator('Glass', const Color(0xFFE53935)),
-                      _buildCategoryIndicator('Plastic', const Color(0xFF8E24AA)),
-                      _buildCategoryIndicator('Others', const Color(0xFF757575)),
-                    ],
+                    children: _wasteByCategoryData.keys.map((category) {
+                      Color color;
+                      if (_wasteCategories.containsKey(category)) {
+                        final colorString = _wasteCategories[category]['color'] ?? '#757575';
+                        color = Color(int.parse(colorString.replaceFirst('#', '0xFF')));
+                      } else {
+                        // Default color
+                        color = const Color(0xFF757575);
+                      }
+                      return _buildCategoryIndicator(category, color);
+                    }).toList(),
                   ),
                 ],
               ),
@@ -1501,15 +1627,6 @@ class _CDWasteDetailsPageState extends State<CDWasteDetailsPage> with SingleTick
   }
   
   List<PieChartSectionData> _getWastePieChartSections() {
-    final colors = [
-      const Color(0xFF1E88E5), // Concrete - Blue
-      const Color(0xFF43A047), // Wood - Green
-      const Color(0xFFFFB300), // Metal - Amber
-      const Color(0xFFE53935), // Glass - Red
-      const Color(0xFF8E24AA), // Plastic - Purple
-      const Color(0xFF757575), // Others - Grey
-    ];
-    
     final categories = _wasteByCategoryData.keys.toList();
     final total = _wasteByCategoryData.values.fold(0.0, (sum, amount) => sum + amount);
     
@@ -1519,9 +1636,27 @@ class _CDWasteDetailsPageState extends State<CDWasteDetailsPage> with SingleTick
       final amount = _wasteByCategoryData[category]!;
       final percentage = total > 0 ? (amount / total) * 100 : 0;
       
+      // Get color from dynamic config or use default
+      Color color;
+      if (_wasteCategories.containsKey(category)) {
+        final colorString = _wasteCategories[category]['color'] ?? '#757575';
+        color = Color(int.parse(colorString.replaceFirst('#', '0xFF')));
+      } else {
+        // Default colors
+        final defaultColors = [
+          const Color(0xFF1E88E5),
+          const Color(0xFF43A047),
+          const Color(0xFFFFB300),
+          const Color(0xFFE53935),
+          const Color(0xFF8E24AA),
+          const Color(0xFF757575),
+        ];
+        color = defaultColors[i % defaultColors.length];
+      }
+      
       sections.add(
         PieChartSectionData(
-          color: colors[i % colors.length],
+          color: color,
           value: amount,
           title: '${percentage.toStringAsFixed(1)}%',
           radius: 60,
@@ -1610,6 +1745,62 @@ class _CDWasteDetailsPageState extends State<CDWasteDetailsPage> with SingleTick
                     ),
                   ],
                 ),
+                // Location section
+                if (waste.location.isNotEmpty || (waste.latitude != null && waste.longitude != null)) ...[
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      const Icon(Icons.location_on, size: 16, color: Color(0xFF00796B)),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            if (waste.location.isNotEmpty)
+                              Text(
+                                waste.location,
+                                style: const TextStyle(fontSize: 12),
+                              ),
+                            if (waste.latitude != null && waste.longitude != null)
+                              Text(
+                                'GPS: ${waste.latitude!.toStringAsFixed(6)}, ${waste.longitude!.toStringAsFixed(6)}',
+                                style: TextStyle(
+                                  fontSize: 10,
+                                  color: Colors.grey[600],
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+                // Photo gallery section
+                if (waste.loadingPhotoUrl != null || waste.unloadingPhotoUrl != null || waste.vendorLicensePhotoUrl != null) ...[
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Photos:',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xFF00796B),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: Row(
+                      children: [
+                        if (waste.loadingPhotoUrl != null)
+                          _buildPhotoThumbnail('Loading', waste.loadingPhotoUrl!),
+                        if (waste.unloadingPhotoUrl != null)
+                          _buildPhotoThumbnail('Unloading', waste.unloadingPhotoUrl!),
+                        if (waste.vendorLicensePhotoUrl != null)
+                          _buildPhotoThumbnail('License', waste.vendorLicensePhotoUrl!),
+                      ],
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
@@ -1648,14 +1839,121 @@ class _CDWasteDetailsPageState extends State<CDWasteDetailsPage> with SingleTick
       ),
     );
   }
+
+  Widget _buildPhotoThumbnail(String label, String photoUrl) {
+    return Container(
+      margin: const EdgeInsets.only(right: 8),
+      child: Column(
+        children: [
+          GestureDetector(
+            onTap: () {
+              // Show full screen image
+              showDialog(
+                context: context,
+                builder: (context) => Dialog(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      AppBar(
+                        title: Text(label),
+                        leading: IconButton(
+                          icon: const Icon(Icons.close),
+                          onPressed: () => Navigator.pop(context),
+                        ),
+                      ),
+                      Expanded(
+                        child: CachedNetworkImage(
+                          imageUrl: photoUrl,
+                          fit: BoxFit.contain,
+                          placeholder: (context, url) => const Center(
+                            child: CircularProgressIndicator(),
+                          ),
+                          errorWidget: (context, url, error) => const Center(
+                            child: Icon(Icons.error),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+            child: Container(
+              width: 80,
+              height: 80,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.grey.shade300),
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: CachedNetworkImage(
+                  imageUrl: photoUrl,
+                  fit: BoxFit.cover,
+                  placeholder: (context, url) => const Center(
+                    child: SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  ),
+                  errorWidget: (context, url, error) => const Icon(Icons.error),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            label,
+            style: const TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class AddWasteDialog extends StatefulWidget {
-  final Function(DailyWaste) onSubmit;
+  final Function(DailyWaste, {File? loadingPhoto, File? unloadingPhoto, File? vendorLicensePhoto}) onSubmit;
+  final List<String> storageMethods;
+  final List<String> disposalMethods;
+  final List<String> wasteTypes;
 
   const AddWasteDialog({
     Key? key,
     required this.onSubmit,
+    this.storageMethods = const [
+      'On-site Container',
+      'Segregated Bins',
+      'Temporary Storage Area',
+      'Skip/Dumpster',
+      'Collection Point',
+      'Other',
+    ],
+    this.disposalMethods = const [
+      'Recycling Facility',
+      'Landfill',
+      'Reuse on Site',
+      'Transfer Station',
+      'Specialist Contractor',
+      'Waste-to-Energy',
+      'Other',
+    ],
+    this.wasteTypes = const [
+      'Mixed C&D Waste',
+      'Concrete Debris',
+      'Wood Waste',
+      'Metal Scrap',
+      'Glass/Ceramic',
+      'Plastic Waste',
+      'Packaging Materials',
+      'Hazardous Waste',
+      'Excavation Soil',
+      'Other',
+    ],
   }) : super(key: key);
 
   @override
@@ -1669,43 +1967,38 @@ class _AddWasteDialogState extends State<AddWasteDialog> {
   final _storageController = TextEditingController();
   final _disposalController = TextEditingController();
   final _notesController = TextEditingController();
+  final _locationController = TextEditingController();
   String _selectedWasteType = 'Mixed C&D Waste';
   
-  final List<String> _wasteTypes = [
-    'Mixed C&D Waste',
-    'Concrete Debris',
-    'Wood Waste',
-    'Metal Scrap',
-    'Glass/Ceramic',
-    'Plastic Waste',
-    'Packaging Materials',
-    'Other',
-  ];
+  String _selectedStorageMethod = '';
+  String _selectedDisposalMethod = '';
   
-  final List<String> _storageMethods = [
-    'On-site Container',
-    'Segregated Bins',
-    'Temporary Storage Area',
-    'Skip/Dumpster',
-    'Collection Point',
-    'Other',
-  ];
+  // Photo upload variables
+  File? _loadingPhoto;
+  File? _unloadingPhoto;
+  File? _vendorLicensePhoto;
+  final ImagePicker _picker = ImagePicker();
   
-  final List<String> _disposalMethods = [
-    'Recycling Facility',
-    'Landfill',
-    'Reuse on Site',
-    'Transfer Station',
-    'Specialist Contractor',
-    'Waste-to-Energy',
-    'Other',
-  ];
+  // Location variables
+  double? _latitude;
+  double? _longitude;
+  String _locationStatus = 'Tap to get location';
+  bool _isLoadingLocation = false;
 
   @override
   void initState() {
     super.initState();
-    _storageController.text = _storageMethods.first;
-    _disposalController.text = _disposalMethods.first;
+    _selectedStorageMethod = widget.storageMethods.isNotEmpty ? widget.storageMethods[0] : 'On-site Container';
+    _selectedDisposalMethod = widget.disposalMethods.isNotEmpty ? widget.disposalMethods[0] : 'Recycling Facility';
+    _selectedWasteType = widget.wasteTypes.isNotEmpty ? widget.wasteTypes[0] : 'Mixed C&D Waste';
+    
+    _storageController.text = _selectedStorageMethod;
+    _disposalController.text = _selectedDisposalMethod;
+    
+    // Automatically get location when dialog opens
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _getCurrentLocation();
+    });
   }
 
   @override
@@ -1714,24 +2007,278 @@ class _AddWasteDialogState extends State<AddWasteDialog> {
     _storageController.dispose();
     _disposalController.dispose();
     _notesController.dispose();
+    _locationController.dispose();
     super.dispose();
   }
 
-  void _submit() {
-  if (_formKey.currentState!.validate()) {
-    final waste = DailyWaste(
-      id: DateTime.now().millisecondsSinceEpoch.toString(),
-      date: _selectedDate,
-      quantity: double.parse(_quantityController.text),  // Parse as double
-      modeOfStorage: _storageController.text,
-      modeOfDisposal: _disposalController.text,
-      wasteType: _selectedWasteType,
-      notes: _notesController.text,
+  // Photo picking functions
+  Future<void> _pickPhoto(String photoType) async {
+    showModalBottomSheet(
+      context: context,
+      builder: (context) => Container(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'Select ${photoType.replaceAll('_', ' ').toUpperCase()}',
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 20),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                ElevatedButton.icon(
+                  onPressed: () {
+                    Navigator.pop(context);
+                    _getImage(ImageSource.camera, photoType);
+                  },
+                  icon: const Icon(Icons.camera_alt),
+                  label: const Text('Camera'),
+                ),
+                ElevatedButton.icon(
+                  onPressed: () {
+                    Navigator.pop(context);
+                    _getImage(ImageSource.gallery, photoType);
+                  },
+                  icon: const Icon(Icons.photo_library),
+                  label: const Text('Gallery'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
     );
-    widget.onSubmit(waste);
-    Navigator.pop(context);
   }
-}
+
+  Future<void> _getImage(ImageSource source, String photoType) async {
+    try {
+      final XFile? image = await _picker.pickImage(
+        source: source,
+        imageQuality: 80,
+        maxWidth: 1024,
+        maxHeight: 1024,
+      );
+      
+      if (image != null) {
+        setState(() {
+          switch (photoType) {
+            case 'loading_photo':
+              _loadingPhoto = File(image.path);
+            case 'unloading_photo':
+              _unloadingPhoto = File(image.path);
+            case 'vendor_license_photo':
+              _vendorLicensePhoto = File(image.path);
+          }
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error picking image: $e')),
+        );
+      }
+    }
+  }
+
+  // Location functions
+  Future<void> _getCurrentLocation() async {
+    setState(() {
+      _isLoadingLocation = true;
+      _locationStatus = 'Getting location...';
+    });
+
+    try {
+      // Check if location services are enabled
+      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) {
+        setState(() {
+          _locationStatus = 'Location services are disabled';
+          _isLoadingLocation = false;
+        });
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Please enable location services')),
+          );
+        }
+        return;
+      }
+
+      // Check location permissions
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+        if (permission == LocationPermission.denied) {
+          setState(() {
+            _locationStatus = 'Location permission denied';
+            _isLoadingLocation = false;
+          });
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Location permission is required')),
+            );
+          }
+          return;
+        }
+      }
+
+      if (permission == LocationPermission.deniedForever) {
+        setState(() {
+          _locationStatus = 'Location permission permanently denied';
+          _isLoadingLocation = false;
+        });
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Please enable location permission in app settings')),
+          );
+        }
+        return;
+      }
+
+      // Get current position
+      Position position = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+      );
+
+      // Get address from coordinates
+      try {
+        List<Placemark> placemarks = await placemarkFromCoordinates(
+          position.latitude,
+          position.longitude,
+        );
+        
+        String address = 'Unknown location';
+        if (placemarks.isNotEmpty) {
+          Placemark placemark = placemarks[0];
+          address = '${placemark.street ?? ''}, ${placemark.locality ?? ''}, ${placemark.administrativeArea ?? ''}';
+        }
+
+        setState(() {
+          _latitude = position.latitude;
+          _longitude = position.longitude;
+          _locationStatus = 'Location captured';
+          _locationController.text = address;
+          _isLoadingLocation = false;
+        });
+      } catch (e) {
+        // If geocoding fails, still save coordinates
+        setState(() {
+          _latitude = position.latitude;
+          _longitude = position.longitude;
+          _locationStatus = 'Location captured';
+          _locationController.text = '${position.latitude.toStringAsFixed(6)}, ${position.longitude.toStringAsFixed(6)}';
+          _isLoadingLocation = false;
+        });
+      }
+    } catch (e) {
+      setState(() {
+        _locationStatus = 'Failed to get location: $e';
+        _isLoadingLocation = false;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error getting location: $e')),
+        );
+      }
+    }
+  }
+
+  Widget _buildPhotoSelector(String label, File? photo, VoidCallback onTap, IconData icon) {
+    return InkWell(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          border: Border.all(color: Colors.grey.shade300),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Row(
+          children: [
+            Icon(icon, color: const Color(0xFF00796B)),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    label,
+                    style: const TextStyle(fontWeight: FontWeight.w500),
+                  ),
+                  if (photo != null)
+                    Text(
+                      'Photo selected',
+                      style: TextStyle(
+                        color: Colors.green,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    )
+                  else
+                    Text(
+                      'Tap to add photo',
+                      style: TextStyle(
+                        color: Colors.grey[600],
+                        fontSize: 12,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            if (photo != null) 
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(8),
+                  image: DecorationImage(
+                    image: FileImage(photo),
+                    fit: BoxFit.cover,
+                  ),
+                ),
+              )
+            else
+              const Icon(Icons.add_a_photo, color: Colors.grey),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _submit() {
+    if (_formKey.currentState!.validate()) {
+      // Validate location is captured
+      if (_latitude == null || _longitude == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Location is required. Please tap to get your current location.'),
+            backgroundColor: Colors.red,
+          ),
+        );
+        return;
+      }
+
+      final waste = DailyWaste(
+        id: DateTime.now().millisecondsSinceEpoch.toString(),
+        date: _selectedDate,
+        quantity: double.parse(_quantityController.text),  // Parse as double
+        modeOfStorage: _storageController.text,
+        modeOfDisposal: _disposalController.text,
+        wasteType: _selectedWasteType,
+        notes: _notesController.text,
+        location: _locationController.text,
+        latitude: _latitude,
+        longitude: _longitude,
+      );
+      widget.onSubmit(
+        waste, 
+        loadingPhoto: _loadingPhoto,
+        unloadingPhoto: _unloadingPhoto,
+        vendorLicensePhoto: _vendorLicensePhoto,
+      );
+      Navigator.pop(context);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1790,7 +2337,7 @@ class _AddWasteDialogState extends State<AddWasteDialog> {
                   ),
                   prefixIcon: const Icon(Icons.category, color: Color(0xFF00796B)),
                 ),
-                items: _wasteTypes.map((type) {
+                items: widget.wasteTypes.map((type) {
                   return DropdownMenuItem<String>(
                     value: type,
                     child: Text(type),
@@ -1827,7 +2374,7 @@ class _AddWasteDialogState extends State<AddWasteDialog> {
               ),
               const SizedBox(height: 16),
               DropdownButtonFormField<String>(
-                value: _storageController.text.isEmpty ? _storageMethods.first : _storageController.text,
+                value: _selectedStorageMethod,
                 decoration: InputDecoration(
                   labelText: 'Mode of Storage',
                   border: OutlineInputBorder(
@@ -1835,7 +2382,7 @@ class _AddWasteDialogState extends State<AddWasteDialog> {
                   ),
                   prefixIcon: const Icon(Icons.inventory_2, color: Color(0xFF00796B)),
                 ),
-                items: _storageMethods.map((method) {
+                items: widget.storageMethods.map((method) {
                   return DropdownMenuItem<String>(
                     value: method,
                     child: Text(method),
@@ -1844,6 +2391,7 @@ class _AddWasteDialogState extends State<AddWasteDialog> {
                 onChanged: (value) {
                   if (value != null) {
                     setState(() {
+                      _selectedStorageMethod = value;
                       _storageController.text = value;
                     });
                   }
@@ -1851,7 +2399,7 @@ class _AddWasteDialogState extends State<AddWasteDialog> {
               ),
               const SizedBox(height: 16),
               DropdownButtonFormField<String>(
-                value: _disposalController.text.isEmpty ? _disposalMethods.first : _disposalController.text,
+                value: _selectedDisposalMethod,
                 decoration: InputDecoration(
                   labelText: 'Mode of Disposal',
                   border: OutlineInputBorder(
@@ -1859,7 +2407,7 @@ class _AddWasteDialogState extends State<AddWasteDialog> {
                   ),
                   prefixIcon: const Icon(Icons.delete_outline, color: Color(0xFF00796B)),
                 ),
-                items: _disposalMethods.map((method) {
+                items: widget.disposalMethods.map((method) {
                   return DropdownMenuItem<String>(
                     value: method,
                     child: Text(method),
@@ -1868,6 +2416,7 @@ class _AddWasteDialogState extends State<AddWasteDialog> {
                 onChanged: (value) {
                   if (value != null) {
                     setState(() {
+                      _selectedDisposalMethod = value;
                       _disposalController.text = value;
                     });
                   }
@@ -1884,6 +2433,109 @@ class _AddWasteDialogState extends State<AddWasteDialog> {
                   prefixIcon: const Icon(Icons.note, color: Color(0xFF00796B)),
                 ),
                 maxLines: 3,
+              ),
+              const SizedBox(height: 16),
+              InkWell(
+                onTap: _getCurrentLocation,
+                child: Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    border: Border.all(color: Colors.grey.shade300),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(
+                        _latitude != null && _longitude != null 
+                          ? Icons.location_on 
+                          : Icons.location_searching,
+                        color: const Color(0xFF00796B),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Location *',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Colors.grey[600],
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              _latitude != null && _longitude != null
+                                  ? _locationController.text.isNotEmpty 
+                                    ? _locationController.text
+                                    : '${_latitude!.toStringAsFixed(6)}, ${_longitude!.toStringAsFixed(6)}'
+                                  : _locationStatus,
+                              style: TextStyle(
+                                fontSize: 16,
+                                color: _latitude != null && _longitude != null 
+                                  ? Colors.black 
+                                  : Colors.grey[600],
+                              ),
+                            ),
+                            if (_latitude != null && _longitude != null)
+                              Text(
+                                'Lat: ${_latitude!.toStringAsFixed(6)}, Lng: ${_longitude!.toStringAsFixed(6)}',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.grey[500],
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                      if (_isLoadingLocation)
+                        const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      else if (_latitude != null && _longitude != null)
+                        const Icon(Icons.check_circle, color: Colors.green)
+                      else
+                        const Icon(Icons.gps_fixed, color: Colors.grey),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20),
+              // Photo upload section
+              const Text(
+                'Photo Documentation',
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                  color: Color(0xFF00796B),
+                ),
+              ),
+              const SizedBox(height: 12),
+              // Loading Photo
+              _buildPhotoSelector(
+                'Loading Photo',
+                _loadingPhoto,
+                () => _pickPhoto('loading_photo'),
+                Icons.upload,
+              ),
+              const SizedBox(height: 12),
+              // Unloading Photo
+              _buildPhotoSelector(
+                'Unloading Photo',
+                _unloadingPhoto,
+                () => _pickPhoto('unloading_photo'),
+                Icons.download,
+              ),
+              const SizedBox(height: 12),
+              // Vendor License Photo
+              _buildPhotoSelector(
+                'Vendor License Photo',
+                _vendorLicensePhoto,
+                () => _pickPhoto('vendor_license_photo'),
+                Icons.badge,
               ),
             ],
           ),
@@ -1914,6 +2566,12 @@ class DailyWaste {
   final String modeOfDisposal;
   final String wasteType;
   final String notes;
+  final String location;
+  final double? latitude;
+  final double? longitude;
+  final String? loadingPhotoUrl;
+  final String? unloadingPhotoUrl;
+  final String? vendorLicensePhotoUrl;
 
   DailyWaste({
     required this.date,
@@ -1923,6 +2581,12 @@ class DailyWaste {
     this.id = '',
     this.wasteType = 'Mixed C&D Waste',
     this.notes = '',
+    this.location = '',
+    this.latitude,
+    this.longitude,
+    this.loadingPhotoUrl,
+    this.unloadingPhotoUrl,
+    this.vendorLicensePhotoUrl,
   });
 
   factory DailyWaste.fromJson(Map<String, dynamic> json) {
@@ -1934,6 +2598,12 @@ class DailyWaste {
       modeOfDisposal: json['mode_of_disposal'] ?? '',
       wasteType: json['waste_type'] ?? 'Mixed C&D Waste',
       notes: json['notes'] ?? '',
+      location: json['location'] ?? '',
+      latitude: json['latitude'] != null ? double.parse(json['latitude'].toString()) : null,
+      longitude: json['longitude'] != null ? double.parse(json['longitude'].toString()) : null,
+      loadingPhotoUrl: json['loading_photo_url'],
+      unloadingPhotoUrl: json['unloading_photo_url'],
+      vendorLicensePhotoUrl: json['vendor_license_photo_url'],
     );
   }
 
@@ -1946,6 +2616,12 @@ class DailyWaste {
       'mode_of_disposal': modeOfDisposal,
       'waste_type': wasteType,
       'notes': notes,
+      'location': location,
+      'latitude': latitude,
+      'longitude': longitude,
+      'loading_photo_url': loadingPhotoUrl,
+      'unloading_photo_url': unloadingPhotoUrl,
+      'vendor_license_photo_url': vendorLicensePhotoUrl,
     };
   }
 }

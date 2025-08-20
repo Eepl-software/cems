@@ -33,17 +33,18 @@ class _WoodPageState extends State<WoodPage> with TickerProviderStateMixin {
   
   // Enhanced OCR field controllers
   final TextEditingController _materialNameController = TextEditingController();
-  final TextEditingController _materialCategoryController = TextEditingController();
-  final TextEditingController _weighmentSlipNoController = TextEditingController();
   final TextEditingController _driverNameController = TextEditingController();
-  final TextEditingController _transporterController = TextEditingController();
   
   // State variables
-  File? _selectedImage;
-  File? _selectedLicense;
+  File? _vehiclePhotoFile;
+  File? _vendorLicenseFile;
+  String? _vehiclePhotoUrl;
+  String? _vendorLicenseUrl;
   bool _isProcessing = false;
-  bool _isUploadingLicense = false;
-  bool _isLicenseUploaded = false;
+  bool _isUploadingVehiclePhoto = false;
+  bool _isUploadingVendorLicense = false;
+  bool _isVehiclePhotoUploaded = false;
+  bool _isVendorLicenseUploaded = false;
   String? _errorMessage;
   Position? _currentLocation;
   
@@ -90,10 +91,7 @@ class _WoodPageState extends State<WoodPage> with TickerProviderStateMixin {
     _contactController.dispose();
     // Enhanced OCR controllers
     _materialNameController.dispose();
-    _materialCategoryController.dispose();
-    _weighmentSlipNoController.dispose();
     _driverNameController.dispose();
-    _transporterController.dispose();
     super.dispose();
   }
 
@@ -140,12 +138,61 @@ class _WoodPageState extends State<WoodPage> with TickerProviderStateMixin {
   }
 
   // Form submission methods
+  Future<void> _pickVehiclePhoto(ImageSource source) async {
+    try {
+      final XFile? image = await _picker.pickImage(source: source);
+      if (image != null) {
+        setState(() {
+          _vehiclePhotoFile = File(image.path);
+          _errorMessage = null;
+        });
+        await _uploadVehiclePhotoToBackend();
+      }
+    } catch (e) {
+      _showErrorSnackBar('Failed to pick vehicle photo: $e');
+    }
+  }
+
+  Future<void> _uploadVehiclePhotoToBackend() async {
+    if (_vehiclePhotoFile == null) return;
+
+    setState(() {
+      _isUploadingVehiclePhoto = true;
+    });
+
+    try {
+      var request = http.MultipartRequest('POST', Uri.parse('$_backendApiUrl/upload-wood-photo'));
+      request.fields['photo_type'] = 'vehicle_photo';
+      request.files.add(await http.MultipartFile.fromPath('photo', _vehiclePhotoFile!.path));
+
+      var response = await request.send();
+      var responseBody = await response.stream.bytesToString();
+
+      if (response.statusCode == 200 || response.statusCode == 201) {
+        var data = json.decode(responseBody);
+        setState(() {
+          _vehiclePhotoUrl = data['photo_url'];
+          _isVehiclePhotoUploaded = true;
+        });
+        _showSuccessSnackBar('Vehicle photo uploaded successfully!');
+      } else {
+        _showErrorSnackBar('Vehicle photo upload failed: ${response.statusCode}');
+      }
+    } catch (e) {
+      _showErrorSnackBar('Vehicle photo upload error: $e');
+    } finally {
+      setState(() {
+        _isUploadingVehiclePhoto = false;
+      });
+    }
+  }
+
   Future<void> _pickImage(ImageSource source) async {
     try {
       final XFile? image = await _picker.pickImage(source: source);
       if (image != null) {
         setState(() {
-          _selectedImage = File(image.path);
+          _vehiclePhotoFile = File(image.path);
           _errorMessage = null;
         });
         await _processImageWithOCR();
@@ -205,15 +252,12 @@ class _WoodPageState extends State<WoodPage> with TickerProviderStateMixin {
       
       // Enhanced OCR fields
       _materialNameController.text = mockData['material_name']!;
-      _materialCategoryController.text = mockData['material_category']!;
-      _weighmentSlipNoController.text = mockData['weighment_slip_no']!;
       _driverNameController.text = mockData['driver_name']!;
-      _transporterController.text = mockData['transporter']!;
     });
   }
 
   Future<void> _processImageWithOCR() async {
-    if (_selectedImage == null) return;
+    if (_vehiclePhotoFile == null) return;
 
     setState(() {
       _isProcessing = true;
@@ -232,13 +276,13 @@ class _WoodPageState extends State<WoodPage> with TickerProviderStateMixin {
     }
 
     try {
-      if (!await File(_selectedImage!.path).exists()) {
+      if (!await File(_vehiclePhotoFile!.path).exists()) {
         _showErrorSnackBar('Selected image file not found');
         return;
       }
       
       var request = http.MultipartRequest('POST', Uri.parse(_ocrApiUrl));
-      request.files.add(await http.MultipartFile.fromPath('file', _selectedImage!.path));
+      request.files.add(await http.MultipartFile.fromPath('file', _vehiclePhotoFile!.path));
 
       var response = await request.send();
       var responseBody = await response.stream.bytesToString();
@@ -258,10 +302,7 @@ class _WoodPageState extends State<WoodPage> with TickerProviderStateMixin {
             
             // Enhanced OCR fields
             _materialNameController.text = extractedData['material_name'] ?? '';
-            _materialCategoryController.text = extractedData['material_category'] ?? '';
-            _weighmentSlipNoController.text = extractedData['weighment_slip_no'] ?? '';
             _driverNameController.text = extractedData['driver_name'] ?? '';
-            _transporterController.text = extractedData['transporter'] ?? '';
           });
           
           _showSuccessSnackBar('Weighbridge slip data extracted successfully!');
@@ -285,10 +326,10 @@ class _WoodPageState extends State<WoodPage> with TickerProviderStateMixin {
       final XFile? image = await _picker.pickImage(source: source);
       if (image != null) {
         setState(() {
-          _selectedLicense = File(image.path);
+          _vendorLicenseFile = File(image.path);
           _errorMessage = null;
         });
-        await _uploadLicenseToBackend();
+        await _uploadVendorLicenseToBackend();
       }
     } catch (e) {
       _showErrorSnackBar('Failed to pick license image: $e');
@@ -305,55 +346,46 @@ class _WoodPageState extends State<WoodPage> with TickerProviderStateMixin {
 
       if (result != null && result.files.single.path != null) {
         setState(() {
-          _selectedLicense = File(result.files.single.path!);
+          _vendorLicenseFile = File(result.files.single.path!);
           _errorMessage = null;
         });
-        await _uploadLicenseToBackend();
+        await _uploadVendorLicenseToBackend();
       }
     } catch (e) {
       _showErrorSnackBar('Failed to pick license file: $e');
     }
   }
 
-  Future<void> _uploadLicenseToBackend() async {
-    if (_selectedLicense == null) return;
-
-    if (_driverNumberController.text.isEmpty || _contactController.text.isEmpty) {
-      _showErrorSnackBar('Please fill driver number and contact number before uploading license.');
-      return;
-    }
+  Future<void> _uploadVendorLicenseToBackend() async {
+    if (_vendorLicenseFile == null) return;
 
     setState(() {
-      _isUploadingLicense = true;
+      _isUploadingVendorLicense = true;
     });
 
     try {
-      bool isConnected = await _testBackendConnection();
-      if (!isConnected) {
-        _showErrorSnackBar('Cannot connect to backend service.');
-        return;
-      }
-
-      var request = http.MultipartRequest('POST', Uri.parse('$_backendApiUrl/upload-license'));
-      request.fields['driver_number'] = _driverNumberController.text;
-      request.fields['contact_number'] = _contactController.text;
-      request.files.add(await http.MultipartFile.fromPath('license', _selectedLicense!.path));
+      var request = http.MultipartRequest('POST', Uri.parse('$_backendApiUrl/upload-wood-photo'));
+      request.fields['photo_type'] = 'vendor_license_photo';
+      request.files.add(await http.MultipartFile.fromPath('photo', _vendorLicenseFile!.path));
 
       var response = await request.send();
+      var responseBody = await response.stream.bytesToString();
 
       if (response.statusCode == 200 || response.statusCode == 201) {
+        var data = json.decode(responseBody);
         setState(() {
-          _isLicenseUploaded = true;
+          _vendorLicenseUrl = data['photo_url'];
+          _isVendorLicenseUploaded = true;
         });
-        _showSuccessSnackBar('Driver license uploaded successfully!');
+        _showSuccessSnackBar('Vendor license uploaded successfully!');
       } else {
-        _showErrorSnackBar('License upload failed: ${response.statusCode}');
+        _showErrorSnackBar('Vendor license upload failed: ${response.statusCode}');
       }
     } catch (e) {
-      _showErrorSnackBar('License upload error: $e');
+      _showErrorSnackBar('Vendor license upload error: $e');
     } finally {
       setState(() {
-        _isUploadingLicense = false;
+        _isUploadingVendorLicense = false;
       });
     }
   }
@@ -369,8 +401,13 @@ class _WoodPageState extends State<WoodPage> with TickerProviderStateMixin {
   }
 
   Future<void> _submitForm() async {
-    if (!_isLicenseUploaded) {
-      _showErrorSnackBar('Driver license upload failed. Proceeding with form submission for testing.');
+    if (!_isVehiclePhotoUploaded) {
+      _showErrorSnackBar('Vehicle photo upload is mandatory for every wood entry');
+      return;
+    }
+    if (!_isVendorLicenseUploaded) {
+      _showErrorSnackBar('Vendor license upload is mandatory for every wood disposal entry');
+      return;
     }
     
     if (_formKey.currentState!.validate()) {
@@ -393,24 +430,36 @@ class _WoodPageState extends State<WoodPage> with TickerProviderStateMixin {
     }
   }
 
+  String _cleanWeightValue(String weightStr) {
+    if (weightStr.isEmpty) return '0';
+    
+    RegExp regExp = RegExp(r'(\d+(?:\.\d+)?)');
+    Match? match = regExp.firstMatch(weightStr);
+    
+    if (match != null) {
+      return match.group(1)!;
+    }
+    
+    return '0';
+  }
+
   Future<void> _submitDataToBackend() async {
     final data = {
       'date': _dateController.text,
       'latitude': _latitudeController.text,
       'longitude': _longitudeController.text,
-      'gross_weight': _grossWeightController.text,
-      'tare_weight': _tareWeightController.text,
-      'net_weight': _netWeightController.text,
+      'gross_weight': _cleanWeightValue(_grossWeightController.text),
+      'tare_weight': _cleanWeightValue(_tareWeightController.text),
+      'net_weight': _cleanWeightValue(_netWeightController.text),
       'vehicle_number': _vehicleNumberController.text,
       'driver_number': _driverNumberController.text,
       'contact_number': _contactController.text,
       'timestamp': DateTime.now().toIso8601String(),
       // Enhanced OCR fields
       'material_name': _materialNameController.text,
-      'material_category': _materialCategoryController.text,
-      'weighment_slip_no': _weighmentSlipNoController.text,
       'driver_name': _driverNameController.text,
-      'transporter': _transporterController.text,
+      'vehicle_photo_url': _vehiclePhotoUrl,
+      'vendor_license_photo_url': _vendorLicenseUrl,
     };
 
     final response = await http.post(
@@ -432,15 +481,20 @@ class _WoodPageState extends State<WoodPage> with TickerProviderStateMixin {
     _driverNumberController.clear();
     _contactController.clear();
     setState(() {
-      _selectedImage = null;
-      _selectedLicense = null;
-      _isLicenseUploaded = false;
+      _vehiclePhotoFile = null;
+      _vendorLicenseFile = null;
+      _isVehiclePhotoUploaded = false;
+      _isVendorLicenseUploaded = false;
+      _vehiclePhotoUrl = null;
+      _vendorLicenseUrl = null;
     });
     _initializeData();
   }
 
   // Dashboard methods
   Future<void> _loadDashboardData() async {
+    if (!mounted) return;
+    
     setState(() {
       _isLoading = true;
       _dashboardErrorMessage = null;
@@ -452,13 +506,17 @@ class _WoodPageState extends State<WoodPage> with TickerProviderStateMixin {
         _loadAnalytics(),
       ]);
     } catch (e) {
-      setState(() {
-        _dashboardErrorMessage = 'Failed to load data: $e';
-      });
+      if (mounted) {
+        setState(() {
+          _dashboardErrorMessage = 'Failed to load data: $e';
+        });
+      }
     } finally {
-      setState(() {
-        _isLoading = false;
-      });
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
     }
   }
 
@@ -585,6 +643,38 @@ class _WoodPageState extends State<WoodPage> with TickerProviderStateMixin {
   }
 
   // UI Helper methods
+  void _showVehiclePhotoSourceDialog() {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('Select Vehicle Photo Source'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.camera_alt),
+                title: const Text('Camera'),
+                onTap: () {
+                  Navigator.pop(context);
+                  _pickVehiclePhoto(ImageSource.camera);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.photo_library),
+                title: const Text('Gallery'),
+                onTap: () {
+                  Navigator.pop(context);
+                  _pickVehiclePhoto(ImageSource.gallery);
+                },
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   void _showImageSourceDialog() {
     showDialog(
       context: context,
@@ -622,14 +712,14 @@ class _WoodPageState extends State<WoodPage> with TickerProviderStateMixin {
       context: context,
       builder: (BuildContext context) {
         return AlertDialog(
-          title: const Text('Upload Driver License'),
+          title: const Text('Upload Vendor License'),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               ListTile(
                 leading: const Icon(Icons.camera_alt),
                 title: const Text('Camera (Photo)'),
-                subtitle: const Text('Take photo of license'),
+                subtitle: const Text('Take photo of vendor license'),
                 onTap: () {
                   Navigator.pop(context);
                   _pickLicenseImage(ImageSource.camera);
@@ -920,7 +1010,11 @@ class _WoodPageState extends State<WoodPage> with TickerProviderStateMixin {
             const SizedBox(height: 24),
             _buildVehicleSection(),
             const SizedBox(height: 24),
+            _buildVehiclePhotoSection(),
+            const SizedBox(height: 24),
             _buildDriverSection(),
+            const SizedBox(height: 24),
+            _buildMaterialSection(),
             const SizedBox(height: 32),
             _buildSubmitButton(),
           ],
@@ -938,11 +1032,11 @@ class _WoodPageState extends State<WoodPage> with TickerProviderStateMixin {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
-              'Upload Weighbridge Slip',
+              'Upload Weighbridge Slip (for OCR)',
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 16),
-            if (_selectedImage != null)
+            if (_vehiclePhotoFile != null)
               Container(
                 height: 200,
                 width: double.infinity,
@@ -952,7 +1046,7 @@ class _WoodPageState extends State<WoodPage> with TickerProviderStateMixin {
                 ),
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(8),
-                  child: Image.file(_selectedImage!, fit: BoxFit.cover),
+                  child: Image.file(_vehiclePhotoFile!, fit: BoxFit.cover),
                 ),
               ),
             const SizedBox(height: 16),
@@ -1209,6 +1303,95 @@ class _WoodPageState extends State<WoodPage> with TickerProviderStateMixin {
     );
   }
 
+  Widget _buildVehiclePhotoSection() {
+    return Card(
+      elevation: 4,
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Text(
+                  'Vehicle Photo',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(width: 8),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: Colors.red,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Text(
+                    'MANDATORY',
+                    style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                  ),
+                ),
+                if (_isVehiclePhotoUploaded)
+                  const SizedBox(width: 8),
+                if (_isVehiclePhotoUploaded)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: Colors.green,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: const Text(
+                      '✓ UPLOADED',
+                      style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            if (_vehiclePhotoFile != null)
+              Container(
+                height: 120,
+                width: double.infinity,
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.grey),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: Image.file(_vehiclePhotoFile!, fit: BoxFit.cover),
+                ),
+              ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: _isUploadingVehiclePhoto ? null : _showVehiclePhotoSourceDialog,
+                    icon: _isUploadingVehiclePhoto
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.camera_alt),
+                    label: Text(_isUploadingVehiclePhoto 
+                        ? 'Uploading...' 
+                        : _isVehiclePhotoUploaded 
+                          ? '✓ Vehicle Photo Uploaded' 
+                          : (_vehiclePhotoFile != null ? 'Change Vehicle Photo' : 'Upload Vehicle Photo')),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: _isVehiclePhotoUploaded ? Colors.green : (_vehiclePhotoFile != null ? Colors.orange : const Color(0xFF8BC34A)),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildDriverSection() {
     return Card(
       elevation: 4,
@@ -1257,10 +1440,59 @@ class _WoodPageState extends State<WoodPage> with TickerProviderStateMixin {
               },
             ),
             const SizedBox(height: 16),
+            TextFormField(
+              controller: _driverNameController,
+              decoration: const InputDecoration(
+                labelText: 'Driver Name',
+                prefixIcon: Icon(Icons.person),
+                border: OutlineInputBorder(),
+              ),
+              validator: (value) {
+                if (value == null || value.isEmpty) {
+                  return 'Driver name is required';
+                }
+                return null;
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMaterialSection() {
+    return Card(
+      elevation: 4,
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Material Information & Vendor License',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 16),
+            TextFormField(
+              controller: _materialNameController,
+              decoration: const InputDecoration(
+                labelText: 'Material Name',
+                prefixIcon: Icon(Icons.category),
+                border: OutlineInputBorder(),
+                hintText: 'e.g., TEAK WOOD, PINE WOOD',
+              ),
+              validator: (value) {
+                if (value == null || value.isEmpty) {
+                  return 'Material name is required';
+                }
+                return null;
+              },
+            ),
+            const SizedBox(height: 16),
             Row(
               children: [
                 const Text(
-                  'Driver License',
+                  'Vendor License Photo',
                   style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
                 ),
                 const SizedBox(width: 8),
@@ -1275,9 +1507,9 @@ class _WoodPageState extends State<WoodPage> with TickerProviderStateMixin {
                     style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
                   ),
                 ),
-                if (_isLicenseUploaded)
+                if (_isVendorLicenseUploaded)
                   const SizedBox(width: 8),
-                if (_isLicenseUploaded)
+                if (_isVendorLicenseUploaded)
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                     decoration: BoxDecoration(
@@ -1292,7 +1524,7 @@ class _WoodPageState extends State<WoodPage> with TickerProviderStateMixin {
               ],
             ),
             const SizedBox(height: 8),
-            if (_selectedLicense != null)
+            if (_vendorLicenseFile != null)
               Container(
                 height: 120,
                 width: double.infinity,
@@ -1302,8 +1534,8 @@ class _WoodPageState extends State<WoodPage> with TickerProviderStateMixin {
                 ),
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(8),
-                  child: _isImageFile(_selectedLicense!.path)
-                      ? Image.file(_selectedLicense!, fit: BoxFit.cover)
+                  child: _isImageFile(_vendorLicenseFile!.path)
+                      ? Image.file(_vendorLicenseFile!, fit: BoxFit.cover)
                       : Container(
                           color: Colors.grey[100],
                           child: Center(
@@ -1311,13 +1543,13 @@ class _WoodPageState extends State<WoodPage> with TickerProviderStateMixin {
                               mainAxisAlignment: MainAxisAlignment.center,
                               children: [
                                 Icon(
-                                  _getFileIcon(_selectedLicense!.path),
+                                  _getFileIcon(_vendorLicenseFile!.path),
                                   size: 40,
                                   color: Colors.grey[600],
                                 ),
                                 const SizedBox(height: 8),
                                 Text(
-                                  _getFileName(_selectedLicense!.path),
+                                  _getFileName(_vendorLicenseFile!.path),
                                   style: TextStyle(
                                     fontSize: 12,
                                     color: Colors.grey[600],
@@ -1336,21 +1568,21 @@ class _WoodPageState extends State<WoodPage> with TickerProviderStateMixin {
               children: [
                 Expanded(
                   child: ElevatedButton.icon(
-                    onPressed: _isUploadingLicense ? null : _showLicenseSourceDialog,
-                    icon: _isUploadingLicense
+                    onPressed: _isUploadingVendorLicense ? null : _showLicenseSourceDialog,
+                    icon: _isUploadingVendorLicense
                         ? const SizedBox(
                             width: 20,
                             height: 20,
                             child: CircularProgressIndicator(strokeWidth: 2),
                           )
                         : const Icon(Icons.upload_file),
-                    label: Text(_isUploadingLicense 
+                    label: Text(_isUploadingVendorLicense 
                         ? 'Uploading...' 
-                        : _isLicenseUploaded 
-                          ? '✓ License Uploaded' 
-                          : (_selectedLicense != null ? 'Change License' : 'Upload License')),
+                        : _isVendorLicenseUploaded 
+                          ? '✓ Vendor License Uploaded' 
+                          : (_vendorLicenseFile != null ? 'Change Vendor License' : 'Upload Vendor License')),
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: _isLicenseUploaded ? Colors.green : (_selectedLicense != null ? Colors.orange : const Color(0xFF8BC34A)),
+                      backgroundColor: _isVendorLicenseUploaded ? Colors.green : (_vendorLicenseFile != null ? Colors.orange : const Color(0xFF8BC34A)),
                       foregroundColor: Colors.white,
                       padding: const EdgeInsets.symmetric(vertical: 12),
                     ),
@@ -1370,7 +1602,7 @@ class _WoodPageState extends State<WoodPage> with TickerProviderStateMixin {
       child: ElevatedButton(
         onPressed: _isProcessing ? null : _submitForm,
         style: ElevatedButton.styleFrom(
-          backgroundColor: _isLicenseUploaded ? const Color(0xFF8BC34A) : Colors.grey,
+          backgroundColor: (_isVehiclePhotoUploaded && _isVendorLicenseUploaded) ? const Color(0xFF8BC34A) : Colors.grey,
           foregroundColor: Colors.white,
           padding: const EdgeInsets.symmetric(vertical: 16),
           shape: RoundedRectangleBorder(
@@ -1397,11 +1629,11 @@ class _WoodPageState extends State<WoodPage> with TickerProviderStateMixin {
                 ],
               )
             : Text(
-                _isLicenseUploaded ? 'Submit Wood Data' : 'Upload License First',
+                (_isVehiclePhotoUploaded && _isVendorLicenseUploaded) ? 'Submit Wood Data' : 'Upload Required Photos First',
                 style: TextStyle(
                   fontSize: 18, 
                   fontWeight: FontWeight.bold,
-                  color: _isLicenseUploaded ? Colors.white : Colors.white70
+                  color: (_isVehiclePhotoUploaded && _isVendorLicenseUploaded) ? Colors.white : Colors.white70
                 ),
               ),
       ),
@@ -1572,27 +1804,33 @@ class _WoodPageState extends State<WoodPage> with TickerProviderStateMixin {
     return Card(
       elevation: 4,
       child: Padding(
-        padding: const EdgeInsets.all(16.0),
+        padding: const EdgeInsets.all(12.0),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 32, color: color),
-            const SizedBox(height: 8),
+            Icon(icon, size: 28, color: color),
+            const SizedBox(height: 6),
             Text(
               value,
               style: TextStyle(
-                fontSize: 20,
+                fontSize: 18,
                 fontWeight: FontWeight.bold,
                 color: color,
               ),
             ),
-            Text(
-              title,
-              style: const TextStyle(
-                fontSize: 12,
-                color: Colors.grey,
+            const SizedBox(height: 2),
+            Flexible(
+              child: Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 11,
+                  color: Colors.grey,
+                ),
+                textAlign: TextAlign.center,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
               ),
-              textAlign: TextAlign.center,
             ),
           ],
         ),

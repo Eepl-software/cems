@@ -12,6 +12,7 @@ import 'water/ConsumptionPage.dart';
 import 'water/BWSSBPage.dart';
 import 'LabourColonyWastePage.dart';
 import 'login/login_page.dart';
+import 'treated_water_dashboard.dart';
 
 // Enhanced Water Consumption Data Model
 class WaterConsumptionData {
@@ -81,7 +82,13 @@ class WaterConsumptionData {
     if (value == null) return 0.0;
     if (value is double) return value;
     if (value is int) return value.toDouble();
-    if (value is String) return double.tryParse(value) ?? 0.0;
+    if (value is String) {
+      // Handle string values more robustly
+      final cleanValue = value.toString().trim();
+      if (cleanValue.isEmpty) return 0.0;
+      return double.tryParse(cleanValue) ?? 0.0;
+    }
+    if (value is num) return value.toDouble();
     return 0.0;
   }
 
@@ -151,6 +158,7 @@ class _EnhancedWaterConsumptionPageState extends State<EnhancedWaterConsumptionP
   bool _isLoading = true;
   String _errorMessage = '';
   int _selectedPhase = 0;
+  int _selectedChartType = 0; // 0: Line Chart, 1: Bar Chart, 2: Pie Chart
   Timer? _refreshTimer;
   DateTime? _lastUpdated;
   bool _isConnected = false;
@@ -855,6 +863,7 @@ class _EnhancedWaterConsumptionPageState extends State<EnhancedWaterConsumptionP
       child: Padding(
         padding: const EdgeInsets.all(12.0),
         child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
             Icon(icon, color: color, size: 24),
             const SizedBox(height: 8),
@@ -862,6 +871,8 @@ class _EnhancedWaterConsumptionPageState extends State<EnhancedWaterConsumptionP
               title,
               style: TextStyle(fontSize: 12, color: Colors.grey[600]),
               textAlign: TextAlign.center,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
             ),
             const SizedBox(height: 4),
             Text(
@@ -881,25 +892,36 @@ class _EnhancedWaterConsumptionPageState extends State<EnhancedWaterConsumptionP
   Widget _buildChart() {
     if (_chartData.isEmpty) {
       return Card(
-        elevation: 4,
+        elevation: 8,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         child: Container(
           height: 200,
           alignment: Alignment.center,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(16),
+            gradient: LinearGradient(
+              colors: [Colors.white, Colors.blue.shade50],
+            ),
+          ),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(Icons.bar_chart_outlined, size: 48, color: Colors.grey[400]),
+              Icon(Icons.analytics_outlined, size: 48, color: Colors.teal.shade300),
               const SizedBox(height: 16),
-              const Text(
+              Text(
                 'No chart data available',
-                style: TextStyle(color: Colors.grey, fontSize: 16),
+                style: TextStyle(
+                  fontSize: 16,
+                  color: Colors.grey[600],
+                  fontWeight: FontWeight.w500,
+                ),
               ),
               const SizedBox(height: 8),
               Text(
                 _isConnected 
                   ? 'Data may not be available for the selected date range'
                   : 'Check your connection and try again',
-                style: TextStyle(color: Colors.grey[600], fontSize: 12),
+                style: TextStyle(color: Colors.grey[500], fontSize: 12),
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: 16),
@@ -918,128 +940,627 @@ class _EnhancedWaterConsumptionPageState extends State<EnhancedWaterConsumptionP
       );
     }
 
+    return _buildUnifiedChartCard();
+  }
+
+  Widget _buildUnifiedChartCard() {
+    return Card(
+      elevation: 8,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Container(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(16),
+          gradient: LinearGradient(
+            colors: [Colors.white, _getChartGradientColor()],
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(20.0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Header with title and status - Fixed overflow
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      _getChartTitle(),
+                      style: TextStyle(
+                        fontSize: MediaQuery.of(context).size.width > 400 ? 18 : 16,
+                        fontWeight: FontWeight.bold,
+                        color: const Color(0xFF1565C0),
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Container(
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(
+                      color: _isConnected ? Colors.green.shade100 : Colors.orange.shade100,
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    child: Icon(
+                      _isConnected ? Icons.trending_up : Icons.trending_flat,
+                      color: _isConnected ? Colors.green.shade700 : Colors.orange.shade700,
+                      size: 18,
+                    ),
+                  ),
+                ],
+              ),
+              
+              const SizedBox(height: 16),
+              
+              // Chart Type Selector with Overflow Protection
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Container(
+                  padding: const EdgeInsets.all(4),
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade100,
+                    borderRadius: BorderRadius.circular(25),
+                  ),
+                  child: IntrinsicWidth(
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _buildChartTypeTab('Line Chart', Icons.show_chart, 0),
+                        _buildChartTypeTab('Bar Chart', Icons.bar_chart, 1),
+                        _buildChartTypeTab('Pie Chart', Icons.pie_chart, 2),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              
+              const SizedBox(height: 20),
+              
+              // Chart Content
+              SizedBox(
+                height: _selectedChartType == 2 ? 280 : 320, // Pie chart needs less height
+                child: _buildSelectedChart(),
+              ),
+              
+              const SizedBox(height: 16),
+              
+              // Enhanced Legend (only for line chart)
+              if (_selectedChartType == 0) _buildChartLegend(),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildChartTypeTab(String title, IconData icon, int index) {
+    bool isSelected = _selectedChartType == index;
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isCompact = screenWidth < 400;
+    
+    return GestureDetector(
+      onTap: () {
+        setState(() {
+          _selectedChartType = index;
+        });
+      },
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: EdgeInsets.symmetric(
+          horizontal: isCompact ? 8 : 12, 
+          vertical: isCompact ? 6 : 8
+        ),
+        margin: const EdgeInsets.symmetric(horizontal: 2),
+        decoration: BoxDecoration(
+          color: isSelected ? const Color(0xFF1565C0) : Colors.transparent,
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              icon,
+              size: isCompact ? 14 : 16,
+              color: isSelected ? Colors.white : Colors.grey.shade600,
+            ),
+            if (!isCompact) ...[
+              const SizedBox(width: 6),
+              Text(
+                title,
+                style: TextStyle(
+                  fontSize: isCompact ? 10 : 12,
+                  fontWeight: FontWeight.w600,
+                  color: isSelected ? Colors.white : Colors.grey.shade600,
+                ),
+              ),
+            ] else if (isSelected) ...[
+              const SizedBox(width: 4),
+              Text(
+                title.split(' ')[0], // Show only first word on compact screens
+                style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.white,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Color _getChartGradientColor() {
+    return switch (_selectedChartType) {
+      0 => Colors.blue.shade50,     // Line Chart
+      1 => Colors.green.shade50,    // Bar Chart
+      2 => Colors.purple.shade50,   // Pie Chart
+      _ => Colors.blue.shade50,
+    };
+  }
+
+  String _getChartTitle() {
+    return switch (_selectedChartType) {
+      0 => 'Water Consumption Trend (Last 7 Days)',
+      1 => 'Total Water Consumption by Source',
+      2 => 'Water Source Distribution',
+      _ => 'Water Consumption Chart',
+    };
+  }
+
+  Widget _buildSelectedChart() {
+    return switch (_selectedChartType) {
+      0 => _buildLineChartContent(),
+      1 => _buildBarChartContent(),
+      2 => _buildPieChartContent(),
+      _ => _buildLineChartContent(),
+    };
+  }
+
+  Widget _buildChartLegend() {
+    Map<String, Color> sourceColors = {
+      'borewell': const Color(0xFF2196F3),
+      'bwssb': const Color(0xFF4CAF50),
+      'labour_colony': const Color(0xFFFF9800),
+      'tanker': const Color(0xFF9C27B0),
+      'mixed': const Color(0xFF00BCD4),
+    };
+
+    // Get unique sources from chart data
+    Set<String> uniqueSources = _chartData.map((point) => point.source).toSet();
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade50,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Wrap(
+        spacing: 16,
+        runSpacing: 8,
+        children: sourceColors.entries.where((entry) => 
+          uniqueSources.contains(entry.key)
+        ).map((entry) {
+          return Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: entry.value.withAlpha(77)),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 16,
+                  height: 16,
+                  decoration: BoxDecoration(
+                    color: entry.value,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  _getReadableSourceName(entry.key),
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFF333333),
+                  ),
+                ),
+              ],
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+
+  Widget _buildLineChartContent() {
+    // Sort chart data by date to ensure proper x-axis ordering
+    final sortedData = List<ChartDataPoint>.from(_chartData)
+      ..sort((a, b) => a.date.compareTo(b.date));
+    
     // Group data by source for multiple line chart
     Map<String, List<FlSpot>> chartLines = {};
     Map<String, Color> sourceColors = {
-      'borewell': Colors.blue,
-      'bwssb': Colors.green,
-      'labour_colony': Colors.orange,
-      'tanker': Colors.purple,
-      'mixed': Colors.teal,
+      'borewell': const Color(0xFF2196F3),     // Blue
+      'bwssb': const Color(0xFF4CAF50),        // Green
+      'labour_colony': const Color(0xFFFF9800), // Orange
+      'tanker': const Color(0xFF9C27B0),       // Purple
+      'mixed': const Color(0xFF00BCD4),        // Cyan
     };
 
-    for (int i = 0; i < _chartData.length; i++) {
-      final point = _chartData[i];
+    for (int i = 0; i < sortedData.length; i++) {
+      final point = sortedData[i];
       if (!chartLines.containsKey(point.source)) {
         chartLines[point.source] = [];
       }
       chartLines[point.source]!.add(FlSpot(i.toDouble(), point.consumption));
     }
 
-    return Card(
-      elevation: 4,
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                const Text(
-                  'Water Consumption Trend (Last 7 Days)',
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.teal,
-                  ),
-                ),
-                Icon(
-                  _isConnected ? Icons.trending_up : Icons.trending_flat,
-                  color: _isConnected ? Colors.green : Colors.orange,
-                  size: 20,
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            SizedBox(
-              height: 250,
-              child: LineChart(
-                LineChartData(
-                  gridData: FlGridData(show: true),
-                  titlesData: FlTitlesData(
-                    bottomTitles: AxisTitles(
-                      sideTitles: SideTitles(
-                        showTitles: true,
-                        getTitlesWidget: (value, meta) {
-                          final index = value.toInt();
-                          if (index >= 0 && index < _chartData.length) {
-                            return Text(
-                              DateFormat('MM/dd').format(_chartData[index].date),
-                              style: const TextStyle(fontSize: 10),
-                            );
-                          }
-                          return const Text('');
-                        },
+    return LineChart(
+      LineChartData(
+        gridData: FlGridData(
+          show: true,
+          drawHorizontalLine: true,
+          drawVerticalLine: true,
+          horizontalInterval: null,
+          verticalInterval: null,
+          getDrawingHorizontalLine: (value) {
+            return FlLine(
+              color: Colors.grey.shade300,
+              strokeWidth: 1,
+              dashArray: [5, 5],
+            );
+          },
+          getDrawingVerticalLine: (value) {
+            return FlLine(
+              color: Colors.grey.shade300,
+              strokeWidth: 1,
+              dashArray: [5, 5],
+            );
+          },
+        ),
+        titlesData: FlTitlesData(
+          bottomTitles: AxisTitles(
+            sideTitles: SideTitles(
+              showTitles: true,
+              reservedSize: 50,
+              interval: 1,
+              getTitlesWidget: (value, meta) {
+                final index = value.toInt();
+                if (index >= 0 && index < sortedData.length) {
+                  return Padding(
+                    padding: const EdgeInsets.only(top: 8.0),
+                    child: Transform.rotate(
+                      angle: -0.5,
+                      child: Text(
+                        DateFormat('MM/dd').format(sortedData[index].date),
+                        style: const TextStyle(
+                          fontSize: 10,
+                          fontWeight: FontWeight.w500,
+                          color: Color(0xFF666666),
+                        ),
+                        textAlign: TextAlign.center,
                       ),
                     ),
-                    leftTitles: AxisTitles(
-                      sideTitles: SideTitles(
-                        showTitles: true,
-                        getTitlesWidget: (value, meta) {
-                          return Text(
-                            _formatChartValue(value),
-                            style: const TextStyle(fontSize: 10),
-                          );
-                        },
-                      ),
-                    ),
-                    rightTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                    topTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                  ),
-                  borderData: FlBorderData(show: true),
-                  lineBarsData: chartLines.entries.map((entry) {
-                    return LineChartBarData(
-                      spots: entry.value,
-                      isCurved: true,
-                      color: sourceColors[entry.key] ?? Colors.grey,
-                      barWidth: 2,
-                      dotData: FlDotData(show: false),
-                    );
-                  }).toList(),
-                ),
-              ),
+                  );
+                }
+                return const SizedBox.shrink();
+              },
             ),
-            const SizedBox(height: 8),
-            // Legend
-            Wrap(
-              children: sourceColors.entries.where((entry) => 
-                chartLines.containsKey(entry.key)
-              ).map((entry) {
-                return Padding(
-                  padding: const EdgeInsets.only(right: 16.0),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Container(
-                        width: 12,
-                        height: 12,
-                        color: entry.value,
-                      ),
-                      const SizedBox(width: 4),
-                      Text(
-                        entry.key.toUpperCase(),
-                        style: const TextStyle(fontSize: 10),
-                      ),
-                    ],
+          ),
+          leftTitles: AxisTitles(
+            sideTitles: SideTitles(
+              showTitles: true,
+              reservedSize: 60,
+              getTitlesWidget: (value, meta) {
+                return Text(
+                  _formatChartValue(value),
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                    color: Color(0xFF666666),
                   ),
                 );
-              }).toList(),
+              },
             ),
-          ],
+          ),
+          rightTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          topTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
+        ),
+        borderData: FlBorderData(
+          show: true,
+          border: Border.all(color: Colors.grey.shade300, width: 1),
+        ),
+        lineBarsData: chartLines.entries.map((entry) {
+          return LineChartBarData(
+            spots: entry.value,
+            isCurved: true,
+            color: sourceColors[entry.key] ?? Colors.grey,
+            barWidth: 3,
+            isStrokeCapRound: true,
+            dotData: FlDotData(
+              show: true,
+              getDotPainter: (spot, percent, barData, index) =>
+                  FlDotCirclePainter(
+                    radius: 4,
+                    color: sourceColors[entry.key] ?? Colors.grey,
+                    strokeWidth: 2,
+                    strokeColor: Colors.white,
+                  ),
+            ),
+            belowBarData: BarAreaData(
+              show: true,
+              color: (sourceColors[entry.key] ?? Colors.grey).withAlpha(51),
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+
+  Widget _buildBarChartContent() {
+    if (_chartData.isEmpty) return const SizedBox.shrink();
+
+    // Calculate totals for each source
+    Map<String, double> sourceTotals = {};
+    Map<String, Color> sourceColors = {
+      'borewell': const Color(0xFF2196F3),
+      'bwssb': const Color(0xFF4CAF50),
+      'labour_colony': const Color(0xFFFF9800),
+      'tanker': const Color(0xFF9C27B0),
+      'mixed': const Color(0xFF00BCD4),
+    };
+
+    for (var point in _chartData) {
+      sourceTotals[point.source] = (sourceTotals[point.source] ?? 0) + point.consumption;
+    }
+
+    return BarChart(
+      BarChartData(
+        alignment: BarChartAlignment.spaceAround,
+        maxY: sourceTotals.values.isEmpty ? 100 : sourceTotals.values.reduce((a, b) => a > b ? a : b) * 1.2,
+        barTouchData: BarTouchData(
+          touchTooltipData: BarTouchTooltipData(
+            tooltipBgColor: Colors.black87,
+            getTooltipItem: (group, groupIndex, rod, rodIndex) {
+              String source = sourceTotals.keys.elementAt(group.x.toInt());
+              return BarTooltipItem(
+                '${_getReadableSourceName(source)}\n${_formatChartValue(rod.toY)}L',
+                const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+              );
+            },
+          ),
+        ),
+        titlesData: FlTitlesData(
+          bottomTitles: AxisTitles(
+            sideTitles: SideTitles(
+              showTitles: true,
+              reservedSize: 40,
+              getTitlesWidget: (value, meta) {
+                if (value.toInt() < sourceTotals.length) {
+                  String source = sourceTotals.keys.elementAt(value.toInt());
+                  return Padding(
+                    padding: const EdgeInsets.only(top: 8.0),
+                    child: Text(
+                      _getReadableSourceName(source),
+                      style: const TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF666666),
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                  );
+                }
+                return const Text('');
+              },
+            ),
+          ),
+          leftTitles: AxisTitles(
+            sideTitles: SideTitles(
+              showTitles: true,
+              reservedSize: 60,
+              getTitlesWidget: (value, meta) {
+                return Text(
+                  _formatChartValue(value),
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                    color: Color(0xFF666666),
+                  ),
+                );
+              },
+            ),
+          ),
+          rightTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          topTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
+        ),
+        borderData: FlBorderData(
+          show: true,
+          border: Border.all(color: Colors.grey.shade300, width: 1),
+        ),
+        barGroups: sourceTotals.entries.map((entry) {
+          int index = sourceTotals.keys.toList().indexOf(entry.key);
+          return BarChartGroupData(
+            x: index,
+            barRods: [
+              BarChartRodData(
+                toY: entry.value,
+                color: sourceColors[entry.key] ?? Colors.grey,
+                width: 40,
+                borderRadius: const BorderRadius.only(
+                  topLeft: Radius.circular(6),
+                  topRight: Radius.circular(6),
+                ),
+                gradient: LinearGradient(
+                  colors: [
+                    sourceColors[entry.key] ?? Colors.grey,
+                    (sourceColors[entry.key] ?? Colors.grey).withAlpha(179),
+                  ],
+                  begin: Alignment.bottomCenter,
+                  end: Alignment.topCenter,
+                ),
+              ),
+            ],
+          );
+        }).toList(),
+        gridData: FlGridData(
+          show: true,
+          drawHorizontalLine: true,
+          drawVerticalLine: false,
+          horizontalInterval: null,
+          getDrawingHorizontalLine: (value) {
+            return FlLine(
+              color: Colors.grey.shade300,
+              strokeWidth: 1,
+              dashArray: [5, 5],
+            );
+          },
         ),
       ),
     );
+  }
+
+  Widget _buildPieChartContent() {
+    if (_chartData.isEmpty) return const SizedBox.shrink();
+
+    // Calculate totals for each source
+    Map<String, double> sourceTotals = {};
+    Map<String, Color> sourceColors = {
+      'borewell': const Color(0xFF2196F3),
+      'bwssb': const Color(0xFF4CAF50),
+      'labour_colony': const Color(0xFFFF9800),
+      'tanker': const Color(0xFF9C27B0),
+      'mixed': const Color(0xFF00BCD4),
+    };
+
+    for (var point in _chartData) {
+      sourceTotals[point.source] = (sourceTotals[point.source] ?? 0) + point.consumption;
+    }
+
+    double total = sourceTotals.values.fold(0, (sum, value) => sum + value);
+
+    return Row(
+      children: [
+        Expanded(
+          flex: 2,
+          child: SizedBox(
+            height: 250,
+            child: PieChart(
+              PieChartData(
+                pieTouchData: PieTouchData(
+                  touchCallback: (FlTouchEvent event, pieTouchResponse) {
+                    // Handle touch events if needed
+                  },
+                ),
+                borderData: FlBorderData(show: false),
+                sectionsSpace: 4,
+                centerSpaceRadius: 60,
+                sections: sourceTotals.entries.map((entry) {
+                  double percentage = (entry.value / total) * 100;
+                  return PieChartSectionData(
+                    color: sourceColors[entry.key] ?? Colors.grey,
+                    value: entry.value,
+                    title: '${percentage.toStringAsFixed(1)}%',
+                    radius: 80,
+                    titleStyle: const TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                    ),
+                  );
+                }).toList(),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 20),
+        Expanded(
+          flex: 1,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: sourceTotals.entries.map((entry) {
+              double percentage = (entry.value / total) * 100;
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 6.0),
+                child: Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.grey.shade200),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Container(
+                            width: 16,
+                            height: 16,
+                            decoration: BoxDecoration(
+                              color: sourceColors[entry.key],
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              _getReadableSourceName(entry.key),
+                              style: const TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: Color(0xFF333333),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        '${_formatChartValue(entry.value)}L',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w500,
+                          color: Color(0xFF666666),
+                        ),
+                      ),
+                      Text(
+                        '${percentage.toStringAsFixed(1)}%',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w500,
+                          color: sourceColors[entry.key],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+        ),
+      ],
+    );
+  }
+
+  String _getReadableSourceName(String source) {
+    switch (source.toLowerCase()) {
+      case 'borewell':
+        return 'Borewell';
+      case 'bwssb':
+        return 'BWSSB';
+      case 'labour_colony':
+        return 'Labour Colony';
+      case 'tanker':
+        return 'Tanker';
+      case 'mixed':
+        return 'Mixed Sources';
+      default:
+        return source.toUpperCase();
+    }
   }
 
   String _formatChartValue(double value) {
@@ -1113,238 +1634,498 @@ class _EnhancedWaterConsumptionPageState extends State<EnhancedWaterConsumptionP
   Widget _buildConsumptionTable() {
     final currentData = _getCurrentData();
     String phaseTitle;
+    Color phaseColor;
     
     switch (_selectedPhase) {
       case 0:
         phaseTitle = 'DURING CONSTRUCTION PHASE';
-        break;
+        phaseColor = const Color(0xFF1565C0);
       case 1:
         phaseTitle = 'FOR THE LABOUR COLONY';
-        break;
+        phaseColor = const Color(0xFF2E7D32);
       case 2:
         phaseTitle = 'DURING OPERATIONAL PHASE';
-        break;
+        phaseColor = const Color(0xFF7B1FA2);
       default:
         phaseTitle = 'DURING CONSTRUCTION PHASE';
+        phaseColor = const Color(0xFF1565C0);
     }
 
     return Card(
-      elevation: 4,
-      child: Padding(
-        padding: const EdgeInsets.all(12.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              phaseTitle,
-              style: const TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.bold,
-                color: Colors.teal,
-              ),
-            ),
-            const SizedBox(height: 12),
-            SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: ConstrainedBox(
-                constraints: BoxConstraints(
-                  minWidth: MediaQuery.of(context).size.width - 64,
-                ),
-                child: DataTable(
-                  columnSpacing: 12,
-                  headingRowHeight: 50,
-                  dataRowHeight: 40,
-                  headingRowColor: MaterialStateProperty.all(Colors.teal.shade50),
-                  border: TableBorder.all(color: Colors.grey.shade300),
-                  columns: [
-                    const DataColumn(
-                      label: SizedBox(
-                        width: 60,
-                        child: Text(
-                          'Source',
-                          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 10),
-                          textAlign: TextAlign.center,
-                        ),
-                      ),
-                    ),
-                    DataColumn(
-                      label: SizedBox(
-                        width: 80,
-                        child: Text(
-                          'Day\n(${DateFormat('dd/MM').format(_selectedDate)})',
-                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 9),
-                          textAlign: TextAlign.center,
-                        ),
-                      ),
-                    ),
-                    const DataColumn(
-                      label: SizedBox(
-                        width: 70,
-                        child: Text(
-                          'Month',
-                          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 10),
-                          textAlign: TextAlign.center,
-                        ),
-                      ),
-                    ),
-                    DataColumn(
-                      label: SizedBox(
-                        width: 90,
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            const Text(
-                              'Period',
-                              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 9),
-                              textAlign: TextAlign.center,
-                            ),
-                            const SizedBox(height: 2),
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                Expanded(
-                                  child: GestureDetector(
-                                    onTap: () => _selectPeriodFromDate(),
-                                    child: Container(
-                                      padding: const EdgeInsets.symmetric(vertical: 1, horizontal: 2),
-                                      decoration: BoxDecoration(
-                                        border: Border.all(color: Colors.grey, width: 0.5),
-                                        borderRadius: BorderRadius.circular(2),
-                                      ),
-                                      child: Text(
-                                        _periodFromDate != null 
-                                            ? DateFormat('dd/MM').format(_periodFromDate!)
-                                            : 'FROM',
-                                        style: const TextStyle(fontSize: 7),
-                                        textAlign: TextAlign.center,
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(width: 2),
-                                Expanded(
-                                  child: GestureDetector(
-                                    onTap: () => _selectPeriodToDate(),
-                                    child: Container(
-                                      padding: const EdgeInsets.symmetric(vertical: 1, horizontal: 2),
-                                      decoration: BoxDecoration(
-                                        border: Border.all(color: Colors.grey, width: 0.5),
-                                        borderRadius: BorderRadius.circular(2),
-                                      ),
-                                      child: Text(
-                                        _periodToDate != null 
-                                            ? DateFormat('dd/MM').format(_periodToDate!)
-                                            : 'TO',
-                                        style: const TextStyle(fontSize: 7),
-                                        textAlign: TextAlign.center,
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    const DataColumn(
-                      label: SizedBox(
-                        width: 70,
-                        child: Text(
-                          'Total',
-                          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 10),
-                          textAlign: TextAlign.center,
-                        ),
-                      ),
-                    ),
-                  ],
-                  rows: [
-                    _buildDataRow('BOREWELLS', currentData.borewellDaily, 
-                                  currentData.borewellMonthly, 
-                                  _periodFromDate != null && _periodToDate != null 
-                                      ? currentData.borewellPeriod 
-                                      : currentData.borewellCumulative),
-                    _buildDataRow('TANKERS', currentData.tankerDaily, 
-                                  currentData.tankerMonthly, 
-                                  _periodFromDate != null && _periodToDate != null 
-                                      ? currentData.tankerPeriod 
-                                      : currentData.tankerCumulative),
-                    _buildDataRow('BWSSB', currentData.bwssbDaily, 
-                                  currentData.bwssbMonthly, 
-                                  _periodFromDate != null && _periodToDate != null 
-                                      ? currentData.bwssbPeriod 
-                                      : currentData.bwssbCumulative),
-                    _buildDataRow('OTHERS', currentData.othersDaily, 
-                                  currentData.othersMonthly, 
-                                  _periodFromDate != null && _periodToDate != null 
-                                      ? currentData.othersPeriod 
-                                      : currentData.othersCumulative),
-                  ],
-                ),
-              ),
-            ),
-          ],
+      elevation: 8,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Container(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(16),
+          gradient: LinearGradient(
+            colors: [
+              Colors.white,
+              phaseColor.withAlpha(13),
+            ],
+          ),
+        ),
+        child: Padding(
+          padding: EdgeInsets.all(_getResponsivePadding()),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _buildTableHeader(phaseTitle, phaseColor),
+              SizedBox(height: _getResponsiveSpacing(20)),
+              _buildResponsiveTable(currentData, phaseColor),
+            ],
+          ),
         ),
       ),
     );
   }
 
-  DataRow _buildDataRow(String source, double daily, double monthly, double totalOrPeriod) {
-    return DataRow(
-      cells: [
-        DataCell(
-          SizedBox(
-            width: 60,
-            child: Text(
-              source,
-              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 9),
-              textAlign: TextAlign.center,
-            ),
+  // Get responsive padding based on screen size
+  double _getResponsivePadding() {
+    final screenWidth = MediaQuery.of(context).size.width;
+    if (screenWidth > 1200) return 24.0; // Desktop
+    if (screenWidth > 800) return 20.0;  // Tablet
+    return 16.0; // Mobile
+  }
+
+  // Get responsive spacing
+  double _getResponsiveSpacing(double baseSpacing) {
+    final screenWidth = MediaQuery.of(context).size.width;
+    if (screenWidth > 1200) return baseSpacing * 1.2; // Desktop
+    if (screenWidth > 800) return baseSpacing;        // Tablet
+    return baseSpacing * 0.8; // Mobile
+  }
+
+  // Get responsive font size
+  double _getResponsiveFontSize(double baseFontSize) {
+    final screenWidth = MediaQuery.of(context).size.width;
+    if (screenWidth > 1200) return baseFontSize * 1.1; // Desktop
+    if (screenWidth > 800) return baseFontSize;        // Tablet
+    return baseFontSize * 0.9; // Mobile
+  }
+
+  Widget _buildTableHeader(String phaseTitle, Color phaseColor) {
+    return Row(
+      children: [
+        Container(
+          padding: EdgeInsets.all(_getResponsiveSpacing(10)),
+          decoration: BoxDecoration(
+            color: phaseColor.withAlpha(26),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Icon(
+            _getPhaseIcon(_selectedPhase),
+            color: phaseColor,
+            size: _getResponsiveSpacing(24),
           ),
         ),
-        DataCell(
-          SizedBox(
-            width: 80,
-            child: Text(
-              '${daily.toStringAsFixed(1)} L',
-              style: const TextStyle(fontSize: 9),
-              textAlign: TextAlign.center,
-            ),
-          ),
-        ),
-        DataCell(
-          SizedBox(
-            width: 70,
-            child: Text(
-              '${monthly.toStringAsFixed(1)} L',
-              style: const TextStyle(fontSize: 9),
-              textAlign: TextAlign.center,
-            ),
-          ),
-        ),
-        DataCell(
-          SizedBox(
-            width: 90,
-            child: Text(
-              '${totalOrPeriod.toStringAsFixed(1)} L',
-              style: const TextStyle(fontSize: 9),
-              textAlign: TextAlign.center,
-            ),
-          ),
-        ),
-        DataCell(
-          SizedBox(
-            width: 70,
-            child: Text(
-              '${totalOrPeriod.toStringAsFixed(1)} L',
-              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 9),
-              textAlign: TextAlign.center,
+        SizedBox(width: _getResponsiveSpacing(12)),
+        Expanded(
+          child: Text(
+            phaseTitle,
+            style: TextStyle(
+              fontSize: _getResponsiveFontSize(18),
+              fontWeight: FontWeight.bold,
+              color: phaseColor,
             ),
           ),
         ),
       ],
     );
   }
+
+  Widget _buildResponsiveTable(WaterConsumptionData currentData, Color phaseColor) {
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isTablet = screenWidth > 800;
+    final isDesktop = screenWidth > 1200;
+    
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.grey.withAlpha(26),
+            blurRadius: 8,
+            spreadRadius: 0,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              minWidth: screenWidth - (isDesktop ? 80 : isTablet ? 64 : 32),
+            ),
+            child: DataTable(
+              columnSpacing: isDesktop ? 24 : isTablet ? 20 : 12,
+              horizontalMargin: isDesktop ? 24 : isTablet ? 20 : 16,
+              headingRowHeight: isDesktop ? 70 : isTablet ? 65 : 55,
+              dataRowMinHeight: isDesktop ? 60 : isTablet ? 55 : 48,
+              dataRowMaxHeight: isDesktop ? 60 : isTablet ? 55 : 48,
+              headingRowColor: WidgetStateProperty.all(phaseColor.withAlpha(26)),
+              dataRowColor: WidgetStateProperty.resolveWith<Color?>(
+                (Set<WidgetState> states) {
+                  if (states.contains(WidgetState.selected)) {
+                    return phaseColor.withAlpha(51);
+                  }
+                  return null;
+                },
+              ),
+              border: TableBorder.all(
+                color: Colors.grey.shade200,
+                width: 1,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              columns: _buildResponsiveColumns(phaseColor, isDesktop, isTablet),
+              rows: _buildResponsiveRows(currentData, isDesktop, isTablet),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  List<DataColumn> _buildResponsiveColumns(Color phaseColor, bool isDesktop, bool isTablet) {
+    final headerFontSize = isDesktop ? 16.0 : isTablet ? 15.0 : 13.0;
+    final subHeaderFontSize = isDesktop ? 12.0 : isTablet ? 11.0 : 10.0;
+    
+    return [
+      DataColumn(
+        label: SizedBox(
+          width: isDesktop ? 120 : isTablet ? 100 : 85,
+          child: Text(
+            'Source',
+            style: TextStyle(
+              fontWeight: FontWeight.bold, 
+              fontSize: headerFontSize,
+              color: phaseColor,
+            ),
+            textAlign: TextAlign.center,
+          ),
+        ),
+      ),
+      DataColumn(
+        label: SizedBox(
+          width: isDesktop ? 110 : isTablet ? 95 : 80,
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Text(
+                'Day',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold, 
+                  fontSize: headerFontSize,
+                  color: phaseColor,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                '(${DateFormat('dd/MM').format(_selectedDate)})',
+                style: TextStyle(
+                  fontWeight: FontWeight.w500, 
+                  fontSize: subHeaderFontSize,
+                  color: phaseColor.withAlpha(179),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+      DataColumn(
+        label: SizedBox(
+          width: isDesktop ? 100 : isTablet ? 85 : 75,
+          child: Text(
+            'Month',
+            style: TextStyle(
+              fontWeight: FontWeight.bold, 
+              fontSize: headerFontSize,
+              color: phaseColor,
+            ),
+            textAlign: TextAlign.center,
+          ),
+        ),
+      ),
+      DataColumn(
+        label: SizedBox(
+          width: isDesktop ? 140 : isTablet ? 120 : 100,
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Text(
+                'Period',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold, 
+                  fontSize: headerFontSize,
+                  color: phaseColor,
+                ),
+              ),
+              const SizedBox(height: 4),
+              if (isTablet) ...[
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Expanded(child: _buildPeriodButton('FROM', _periodFromDate, phaseColor, true)),
+                    const SizedBox(width: 4),
+                    Expanded(child: _buildPeriodButton('TO', _periodToDate, phaseColor, false)),
+                  ],
+                ),
+              ] else ...[
+                Text(
+                  'Custom Range',
+                  style: TextStyle(
+                    fontSize: subHeaderFontSize,
+                    color: phaseColor.withAlpha(179),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+      DataColumn(
+        label: SizedBox(
+          width: isDesktop ? 100 : isTablet ? 90 : 80,
+          child: Text(
+            'Total',
+            style: TextStyle(
+              fontWeight: FontWeight.bold, 
+              fontSize: headerFontSize,
+              color: phaseColor,
+            ),
+            textAlign: TextAlign.center,
+          ),
+        ),
+      ),
+    ];
+  }
+
+  Widget _buildPeriodButton(String label, DateTime? date, Color phaseColor, bool isFrom) {
+    return GestureDetector(
+      onTap: isFrom ? _selectPeriodFromDate : _selectPeriodToDate,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 3, horizontal: 4),
+        decoration: BoxDecoration(
+          color: phaseColor.withAlpha(51),
+          borderRadius: BorderRadius.circular(4),
+          border: Border.all(color: phaseColor.withAlpha(77)),
+        ),
+        child: Text(
+          date != null ? DateFormat('dd/MM').format(date) : label,
+          style: const TextStyle(
+            fontSize: 9,
+            fontWeight: FontWeight.w600,
+            color: Colors.white,
+          ),
+          textAlign: TextAlign.center,
+        ),
+      ),
+    );
+  }
+
+  List<DataRow> _buildResponsiveRows(WaterConsumptionData currentData, bool isDesktop, bool isTablet) {
+    return [
+      _buildResponsiveDataRow('BOREWELLS', currentData.borewellDaily, 
+                    currentData.borewellMonthly, 
+                    _periodFromDate != null && _periodToDate != null 
+                        ? currentData.borewellPeriod 
+                        : currentData.borewellCumulative,
+                    const Color(0xFF2196F3), isDesktop, isTablet),
+      _buildResponsiveDataRow('TANKERS', currentData.tankerDaily, 
+                    currentData.tankerMonthly, 
+                    _periodFromDate != null && _periodToDate != null 
+                        ? currentData.tankerPeriod 
+                        : currentData.tankerCumulative,
+                    const Color(0xFF9C27B0), isDesktop, isTablet),
+      _buildResponsiveDataRow('BWSSB', currentData.bwssbDaily, 
+                    currentData.bwssbMonthly, 
+                    _periodFromDate != null && _periodToDate != null 
+                        ? currentData.bwssbPeriod 
+                        : currentData.bwssbCumulative,
+                    const Color(0xFF4CAF50), isDesktop, isTablet),
+      _buildResponsiveDataRow('OTHERS', currentData.othersDaily, 
+                    currentData.othersMonthly, 
+                    _periodFromDate != null && _periodToDate != null 
+                        ? currentData.othersPeriod 
+                        : currentData.othersCumulative,
+                    const Color(0xFFFF9800), isDesktop, isTablet),
+    ];
+  }
+
+  // Helper method to get phase-specific icons
+  IconData _getPhaseIcon(int phase) {
+    switch (phase) {
+      case 0: // Construction
+        return Icons.construction;
+      case 1: // Labour Colony
+        return Icons.home_work;
+      case 2: // Operational
+        return Icons.factory;
+      default:
+        return Icons.water_drop;
+    }
+  }
+
+  // Responsive data row with better styling and source colors
+  DataRow _buildResponsiveDataRow(String source, double daily, double monthly, double totalOrPeriod, Color sourceColor, bool isDesktop, bool isTablet) {
+    final sourceFontSize = isDesktop ? 14.0 : isTablet ? 13.0 : 12.0;
+    final valueFontSize = isDesktop ? 13.0 : isTablet ? 12.0 : 11.0;
+    final totalFontSize = isDesktop ? 14.0 : isTablet ? 13.0 : 12.0;
+    
+    return DataRow(
+      cells: [
+        DataCell(
+          Container(
+            width: isDesktop ? 120 : isTablet ? 100 : 85,
+            padding: EdgeInsets.symmetric(
+              vertical: isDesktop ? 8 : isTablet ? 6 : 4, 
+              horizontal: isDesktop ? 8 : isTablet ? 6 : 4
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: isDesktop ? 4 : 3,
+                  height: isDesktop ? 28 : isTablet ? 24 : 20,
+                  decoration: BoxDecoration(
+                    color: sourceColor,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                SizedBox(width: isDesktop ? 8 : isTablet ? 6 : 4),
+                Expanded(
+                  child: Text(
+                    source,
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold, 
+                      fontSize: sourceFontSize,
+                      color: const Color(0xFF333333),
+                    ),
+                    textAlign: TextAlign.left,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        DataCell(
+          Container(
+            width: isDesktop ? 110 : isTablet ? 95 : 80,
+            alignment: Alignment.center,
+            child: Container(
+              padding: EdgeInsets.symmetric(
+                horizontal: isDesktop ? 8 : isTablet ? 6 : 4, 
+                vertical: isDesktop ? 6 : isTablet ? 5 : 4
+              ),
+              decoration: BoxDecoration(
+                color: sourceColor.withAlpha(26),
+                borderRadius: BorderRadius.circular(isDesktop ? 8 : 6),
+              ),
+              child: Text(
+                '${daily.toStringAsFixed(1)} L',
+                style: TextStyle(
+                  fontSize: valueFontSize,
+                  fontWeight: FontWeight.w600,
+                  color: sourceColor,
+                ),
+                textAlign: TextAlign.center,
+              ),
+            ),
+          ),
+        ),
+        DataCell(
+          Container(
+            width: isDesktop ? 100 : isTablet ? 85 : 75,
+            alignment: Alignment.center,
+            child: Container(
+              padding: EdgeInsets.symmetric(
+                horizontal: isDesktop ? 8 : isTablet ? 6 : 4, 
+                vertical: isDesktop ? 6 : isTablet ? 5 : 4
+              ),
+              decoration: BoxDecoration(
+                color: sourceColor.withAlpha(26),
+                borderRadius: BorderRadius.circular(isDesktop ? 8 : 6),
+              ),
+              child: Text(
+                '${monthly.toStringAsFixed(1)} L',
+                style: TextStyle(
+                  fontSize: valueFontSize,
+                  fontWeight: FontWeight.w600,
+                  color: sourceColor,
+                ),
+                textAlign: TextAlign.center,
+              ),
+            ),
+          ),
+        ),
+        DataCell(
+          Container(
+            width: isDesktop ? 140 : isTablet ? 120 : 100,
+            alignment: Alignment.center,
+            child: Container(
+              padding: EdgeInsets.symmetric(
+                horizontal: isDesktop ? 8 : isTablet ? 6 : 4, 
+                vertical: isDesktop ? 6 : isTablet ? 5 : 4
+              ),
+              decoration: BoxDecoration(
+                color: sourceColor.withAlpha(26),
+                borderRadius: BorderRadius.circular(isDesktop ? 8 : 6),
+              ),
+              child: Text(
+                '${totalOrPeriod.toStringAsFixed(1)} L',
+                style: TextStyle(
+                  fontSize: valueFontSize,
+                  fontWeight: FontWeight.w600,
+                  color: sourceColor,
+                ),
+                textAlign: TextAlign.center,
+              ),
+            ),
+          ),
+        ),
+        DataCell(
+          Container(
+            width: isDesktop ? 100 : isTablet ? 90 : 80,
+            alignment: Alignment.center,
+            child: Container(
+              padding: EdgeInsets.symmetric(
+                horizontal: isDesktop ? 12 : isTablet ? 10 : 8, 
+                vertical: isDesktop ? 8 : isTablet ? 6 : 5
+              ),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [
+                    sourceColor,
+                    sourceColor.withAlpha(204),
+                  ],
+                ),
+                borderRadius: BorderRadius.circular(isDesktop ? 10 : isTablet ? 8 : 6),
+                boxShadow: [
+                  BoxShadow(
+                    color: sourceColor.withAlpha(51),
+                    blurRadius: isDesktop ? 6 : isTablet ? 4 : 3,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: Text(
+                '${totalOrPeriod.toStringAsFixed(1)} L',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold, 
+                  fontSize: totalFontSize,
+                  color: Colors.white,
+                ),
+                textAlign: TextAlign.center,
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
 
   // CORRECTED ACTION BUTTONS WITH PROPER NAVIGATION
   Widget _buildActionButtons() {
@@ -1414,6 +2195,26 @@ class _EnhancedWaterConsumptionPageState extends State<EnhancedWaterConsumptionP
                   MaterialPageRoute(builder: (context) => const LabourColonyPage()),
                 ),
               ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Expanded(
+              child: _buildActionButton(
+                'Treated Water',
+                Icons.water_drop_outlined,
+                Colors.cyan,
+                () => Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (context) => const TreatedWaterDashboard()),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Container(), // Empty space to maintain layout
             ),
           ],
         ),

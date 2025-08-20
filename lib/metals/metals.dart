@@ -33,10 +33,7 @@ class _MetalsPageState extends State<MetalsPage> with TickerProviderStateMixin {
   
   // Enhanced OCR field controllers
   final TextEditingController _materialNameController = TextEditingController();
-  final TextEditingController _materialCategoryController = TextEditingController();
-  final TextEditingController _weighmentSlipNoController = TextEditingController();
   final TextEditingController _driverNameController = TextEditingController();
-  final TextEditingController _transporterController = TextEditingController();
   
   // State variables
   File? _selectedImage;
@@ -46,6 +43,16 @@ class _MetalsPageState extends State<MetalsPage> with TickerProviderStateMixin {
   bool _isLicenseUploaded = false;
   String? _errorMessage;
   Position? _currentLocation;
+  
+  // Vehicle and vendor photo state variables
+  File? _vehiclePhotoFile;
+  File? _vendorLicenseFile;
+  String? _vehiclePhotoUrl;
+  String? _vendorLicenseUrl;
+  bool _isVehiclePhotoUploaded = false;
+  bool _isVendorLicenseUploaded = false;
+  bool _isUploadingVehiclePhoto = false;
+  bool _isUploadingVendorLicense = false;
   
   // Dashboard state
   List<Map<String, dynamic>> _submissions = [];
@@ -90,10 +97,7 @@ class _MetalsPageState extends State<MetalsPage> with TickerProviderStateMixin {
     _contactController.dispose();
     // Enhanced OCR controllers
     _materialNameController.dispose();
-    _materialCategoryController.dispose();
-    _weighmentSlipNoController.dispose();
     _driverNameController.dispose();
-    _transporterController.dispose();
     super.dispose();
   }
 
@@ -171,25 +175,19 @@ class _MetalsPageState extends State<MetalsPage> with TickerProviderStateMixin {
     final List<Map<String, String>> mockDataOptions = [
       {
         'material_name': 'STEEL REBARS',
-        'material_category': '16mm TMT',
         'gross_weight': '28540 KG',
         'tare_weight': '7800 KG',
         'net_weight': '20740 KG',
-        'weighment_slip_no': 'WB48R20250715143028-5',
         'vehicle_number': 'AP12XY7890',
         'driver_name': 'kumar',
-        'transporter': 'steel industries ltd',
       },
       {
         'material_name': 'ALUMINUM SECTIONS',
-        'material_category': 'L-Angle 50x50',
         'gross_weight': '15420 KG',
         'tare_weight': '6200 KG',
         'net_weight': '9220 KG',
-        'weighment_slip_no': 'WB48R20250715154512-6',
         'vehicle_number': 'TN09AB3456',
         'driver_name': 'ravi',
-        'transporter': 'metro alloys',
       }
     ];
 
@@ -205,10 +203,7 @@ class _MetalsPageState extends State<MetalsPage> with TickerProviderStateMixin {
       
       // Enhanced OCR fields
       _materialNameController.text = mockData['material_name']!;
-      _materialCategoryController.text = mockData['material_category']!;
-      _weighmentSlipNoController.text = mockData['weighment_slip_no']!;
       _driverNameController.text = mockData['driver_name']!;
-      _transporterController.text = mockData['transporter']!;
     });
   }
 
@@ -258,10 +253,7 @@ class _MetalsPageState extends State<MetalsPage> with TickerProviderStateMixin {
             
             // Enhanced OCR fields
             _materialNameController.text = extractedData['material_name'] ?? '';
-            _materialCategoryController.text = extractedData['material_category'] ?? '';
-            _weighmentSlipNoController.text = extractedData['weighment_slip_no'] ?? '';
             _driverNameController.text = extractedData['driver_name'] ?? '';
-            _transporterController.text = extractedData['transporter'] ?? '';
           });
           
           _showSuccessSnackBar('Weighbridge slip data extracted successfully!');
@@ -368,7 +360,116 @@ class _MetalsPageState extends State<MetalsPage> with TickerProviderStateMixin {
     }
   }
 
+  // Vehicle photo upload methods
+  Future<void> _pickVehiclePhoto(ImageSource source) async {
+    try {
+      final XFile? image = await _picker.pickImage(source: source);
+      if (image != null) {
+        setState(() {
+          _vehiclePhotoFile = File(image.path);
+        });
+        await _uploadVehiclePhotoToBackend();
+      }
+    } catch (e) {
+      _showErrorSnackBar('Failed to pick vehicle photo: $e');
+    }
+  }
+
+  Future<void> _uploadVehiclePhotoToBackend() async {
+    if (_vehiclePhotoFile == null) return;
+
+    setState(() {
+      _isUploadingVehiclePhoto = true;
+    });
+
+    try {
+      var request = http.MultipartRequest('POST', Uri.parse('$_backendApiUrl/upload-metals-photo'));
+      request.fields['type'] = 'vehicle';
+      request.files.add(await http.MultipartFile.fromPath('photo', _vehiclePhotoFile!.path));
+
+      var response = await request.send();
+      var responseBody = await response.stream.bytesToString();
+
+      if (response.statusCode == 200 || response.statusCode == 201) {
+        var data = json.decode(responseBody);
+        setState(() {
+          _vehiclePhotoUrl = data['url'];
+          _isVehiclePhotoUploaded = true;
+        });
+        _showSuccessSnackBar('Vehicle photo uploaded successfully!');
+      } else {
+        _showErrorSnackBar('Vehicle photo upload failed: ${response.statusCode}');
+      }
+    } catch (e) {
+      _showErrorSnackBar('Vehicle photo upload error: $e');
+    } finally {
+      setState(() {
+        _isUploadingVehiclePhoto = false;
+      });
+    }
+  }
+
+  // Vendor license photo upload methods
+  Future<void> _pickVendorLicense(ImageSource source) async {
+    try {
+      final XFile? image = await _picker.pickImage(source: source);
+      if (image != null) {
+        setState(() {
+          _vendorLicenseFile = File(image.path);
+        });
+        await _uploadVendorLicenseToBackend();
+      }
+    } catch (e) {
+      _showErrorSnackBar('Failed to pick vendor license: $e');
+    }
+  }
+
+  Future<void> _uploadVendorLicenseToBackend() async {
+    if (_vendorLicenseFile == null) return;
+
+    setState(() {
+      _isUploadingVendorLicense = true;
+    });
+
+    try {
+      var request = http.MultipartRequest('POST', Uri.parse('$_backendApiUrl/upload-metals-photo'));
+      request.fields['type'] = 'vendor_license';
+      request.files.add(await http.MultipartFile.fromPath('photo', _vendorLicenseFile!.path));
+
+      var response = await request.send();
+      var responseBody = await response.stream.bytesToString();
+
+      if (response.statusCode == 200 || response.statusCode == 201) {
+        var data = json.decode(responseBody);
+        setState(() {
+          _vendorLicenseUrl = data['url'];
+          _isVendorLicenseUploaded = true;
+        });
+        _showSuccessSnackBar('Vendor license uploaded successfully!');
+      } else {
+        _showErrorSnackBar('Vendor license upload failed: ${response.statusCode}');
+      }
+    } catch (e) {
+      _showErrorSnackBar('Vendor license upload error: $e');
+    } finally {
+      setState(() {
+        _isUploadingVendorLicense = false;
+      });
+    }
+  }
+
   Future<void> _submitForm() async {
+    // Check if required photos are uploaded
+    if (!_isVehiclePhotoUploaded) {
+      _showErrorSnackBar('Please upload vehicle photo before submitting.');
+      return;
+    }
+    
+    if (!_isVendorLicenseUploaded) {
+      _showErrorSnackBar('Please upload vendor license photo before submitting.');
+      return;
+    }
+    
     if (!_isLicenseUploaded) {
       _showErrorSnackBar('Driver license upload failed. Proceeding with form submission for testing.');
     }
@@ -407,10 +508,10 @@ class _MetalsPageState extends State<MetalsPage> with TickerProviderStateMixin {
       'timestamp': DateTime.now().toIso8601String(),
       // Enhanced OCR fields
       'material_name': _materialNameController.text,
-      'material_category': _materialCategoryController.text,
-      'weighment_slip_no': _weighmentSlipNoController.text,
       'driver_name': _driverNameController.text,
-      'transporter': _transporterController.text,
+      // Photo URLs
+      'vehicle_photo_url': _vehiclePhotoUrl ?? '',
+      'vendor_license_photo_url': _vendorLicenseUrl ?? '',
     };
 
     final response = await http.post(
@@ -433,14 +534,20 @@ class _MetalsPageState extends State<MetalsPage> with TickerProviderStateMixin {
     _contactController.clear();
     // Clear enhanced OCR fields
     _materialNameController.clear();
-    _materialCategoryController.clear();
-    _weighmentSlipNoController.clear();
     _driverNameController.clear();
-    _transporterController.clear();
     setState(() {
       _selectedImage = null;
       _selectedLicense = null;
       _isLicenseUploaded = false;
+      // Clear vehicle and vendor photo state
+      _vehiclePhotoFile = null;
+      _vendorLicenseFile = null;
+      _vehiclePhotoUrl = null;
+      _vendorLicenseUrl = null;
+      _isVehiclePhotoUploaded = false;
+      _isVendorLicenseUploaded = false;
+      _isUploadingVehiclePhoto = false;
+      _isUploadingVendorLicense = false;
     });
     _initializeData();
   }
@@ -614,6 +721,74 @@ class _MetalsPageState extends State<MetalsPage> with TickerProviderStateMixin {
                 onTap: () {
                   Navigator.pop(context);
                   _pickImage(ImageSource.gallery);
+                },
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  void _showVehiclePhotoDialog() {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('Upload Vehicle Photo'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.camera_alt),
+                title: const Text('Camera'),
+                subtitle: const Text('Take photo of vehicle'),
+                onTap: () {
+                  Navigator.pop(context);
+                  _pickVehiclePhoto(ImageSource.camera);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.photo_library),
+                title: const Text('Gallery'),
+                subtitle: const Text('Select from gallery'),
+                onTap: () {
+                  Navigator.pop(context);
+                  _pickVehiclePhoto(ImageSource.gallery);
+                },
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  void _showVendorLicenseDialog() {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('Upload Vendor License'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.camera_alt),
+                title: const Text('Camera'),
+                subtitle: const Text('Take photo of license'),
+                onTap: () {
+                  Navigator.pop(context);
+                  _pickVendorLicense(ImageSource.camera);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.photo_library),
+                title: const Text('Gallery'),
+                subtitle: const Text('Select from gallery'),
+                onTap: () {
+                  Navigator.pop(context);
+                  _pickVendorLicense(ImageSource.gallery);
                 },
               ),
             ],
@@ -832,14 +1007,13 @@ class _MetalsPageState extends State<MetalsPage> with TickerProviderStateMixin {
                 // Enhanced OCR fields
                 if (submission['material_name'] != null && submission['material_name'].toString().isNotEmpty)
                   _buildDetailRow('Material Name', submission['material_name']),
-                if (submission['material_category'] != null && submission['material_category'].toString().isNotEmpty)
-                  _buildDetailRow('Material Category', submission['material_category']),
-                if (submission['weighment_slip_no'] != null && submission['weighment_slip_no'].toString().isNotEmpty)
-                  _buildDetailRow('Weighment Slip No', submission['weighment_slip_no']),
                 if (submission['driver_name'] != null && submission['driver_name'].toString().isNotEmpty)
                   _buildDetailRow('Driver Name (OCR)', submission['driver_name']),
-                if (submission['transporter'] != null && submission['transporter'].toString().isNotEmpty)
-                  _buildDetailRow('Transporter', submission['transporter']),
+                // Photo URLs
+                if (submission['vehicle_photo_url'] != null && submission['vehicle_photo_url'].toString().isNotEmpty)
+                  _buildPhotoRow('Vehicle Photo', submission['vehicle_photo_url']),
+                if (submission['vendor_license_photo_url'] != null && submission['vendor_license_photo_url'].toString().isNotEmpty)
+                  _buildPhotoRow('Vendor License', submission['vendor_license_photo_url']),
                 _buildDetailRow('Latitude', submission['latitude']),
                 _buildDetailRow('Longitude', submission['longitude']),
                 _buildDetailRow('Submitted At', submission['created_at']),
@@ -873,6 +1047,79 @@ class _MetalsPageState extends State<MetalsPage> with TickerProviderStateMixin {
           Expanded(
             child: Text(value?.toString() ?? 'N/A'),
           ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPhotoRow(String label, String? photoUrl) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '$label:',
+            style: const TextStyle(fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 4),
+          if (photoUrl != null && photoUrl.isNotEmpty)
+            Container(
+              height: 150,
+              width: double.infinity,
+              decoration: BoxDecoration(
+                border: Border.all(color: Colors.grey),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: photoUrl.startsWith('http')
+                    ? Image.network(
+                        photoUrl,
+                        fit: BoxFit.cover,
+                        errorBuilder: (context, error, stackTrace) {
+                          return Container(
+                            color: Colors.grey[200],
+                            child: const Center(
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(Icons.error, color: Colors.red),
+                                  Text('Failed to load image'),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                        loadingBuilder: (context, child, loadingProgress) {
+                          if (loadingProgress == null) return child;
+                          return Container(
+                            color: Colors.grey[200],
+                            child: const Center(
+                              child: CircularProgressIndicator(),
+                            ),
+                          );
+                        },
+                      )
+                    : Container(
+                        color: Colors.grey[200],
+                        child: const Center(
+                          child: Text('Invalid photo URL'),
+                        ),
+                      ),
+              ),
+            )
+          else
+            Container(
+              height: 50,
+              decoration: BoxDecoration(
+                color: Colors.grey[200],
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Center(
+                child: Text('No photo available'),
+              ),
+            ),
         ],
       ),
     );
@@ -936,6 +1183,10 @@ class _MetalsPageState extends State<MetalsPage> with TickerProviderStateMixin {
             _buildWeightSection(),
             const SizedBox(height: 24),
             _buildVehicleSection(),
+            const SizedBox(height: 24),
+            _buildVehiclePhotoSection(),
+            const SizedBox(height: 24),
+            _buildMaterialSection(),
             const SizedBox(height: 24),
             _buildWeighbridgeSlipDataSection(),
             const SizedBox(height: 24),
@@ -1215,38 +1466,6 @@ class _MetalsPageState extends State<MetalsPage> with TickerProviderStateMixin {
               },
             ),
             const SizedBox(height: 16),
-            TextFormField(
-              controller: _materialCategoryController,
-              decoration: const InputDecoration(
-                labelText: 'Material Category',
-                prefixIcon: Icon(Icons.category),
-                border: OutlineInputBorder(),
-              ),
-              keyboardType: TextInputType.text,
-              validator: (value) {
-                if (value == null || value.isEmpty) {
-                  return 'Material category is required';
-                }
-                return null;
-              },
-            ),
-            const SizedBox(height: 16),
-            TextFormField(
-              controller: _weighmentSlipNoController,
-              decoration: const InputDecoration(
-                labelText: 'Weighment Slip Number',
-                prefixIcon: Icon(Icons.confirmation_number),
-                border: OutlineInputBorder(),
-              ),
-              keyboardType: TextInputType.text,
-              validator: (value) {
-                if (value == null || value.isEmpty) {
-                  return 'Weighment slip number is required';
-                }
-                return null;
-              },
-            ),
-            const SizedBox(height: 16),
             Row(
               children: [
                 Expanded(
@@ -1261,24 +1480,6 @@ class _MetalsPageState extends State<MetalsPage> with TickerProviderStateMixin {
                     validator: (value) {
                       if (value == null || value.isEmpty) {
                         return 'Driver name is required';
-                      }
-                      return null;
-                    },
-                  ),
-                ),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: TextFormField(
-                    controller: _transporterController,
-                    decoration: const InputDecoration(
-                      labelText: 'Transporter',
-                      prefixIcon: Icon(Icons.local_shipping),
-                      border: OutlineInputBorder(),
-                    ),
-                    keyboardType: TextInputType.text,
-                    validator: (value) {
-                      if (value == null || value.isEmpty) {
-                        return 'Transporter is required';
                       }
                       return null;
                     },
@@ -1536,13 +1737,198 @@ class _MetalsPageState extends State<MetalsPage> with TickerProviderStateMixin {
     );
   }
 
+  Widget _buildVehiclePhotoSection() {
+    return Card(
+      elevation: 4,
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.local_shipping, color: Colors.blue),
+                const SizedBox(width: 8),
+                const Text(
+                  'Vehicle Photo',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(width: 8),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: Colors.red,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Text(
+                    'MANDATORY',
+                    style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                  ),
+                ),
+                if (_isVehiclePhotoUploaded) ...
+                [
+                  const SizedBox(width: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: Colors.green,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: const Text(
+                      '✓ UPLOADED',
+                      style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+            const SizedBox(height: 16),
+            if (_vehiclePhotoFile != null)
+              Container(
+                height: 200,
+                width: double.infinity,
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.grey),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: Image.file(_vehiclePhotoFile!, fit: BoxFit.cover),
+                ),
+              ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: _isUploadingVehiclePhoto ? null : () => _showVehiclePhotoDialog(),
+                    icon: _isUploadingVehiclePhoto
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.camera_alt),
+                    label: Text(_isUploadingVehiclePhoto 
+                        ? 'Uploading...' 
+                        : _isVehiclePhotoUploaded 
+                          ? '✓ Vehicle Photo Uploaded' 
+                          : 'Upload Vehicle Photo'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: _isVehiclePhotoUploaded ? Colors.green : const Color(0xFF607D8B),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMaterialSection() {
+    return Card(
+      elevation: 4,
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.description, color: Colors.orange),
+                const SizedBox(width: 8),
+                const Text(
+                  'Material/Vendor License',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(width: 8),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: Colors.red,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Text(
+                    'MANDATORY',
+                    style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                  ),
+                ),
+                if (_isVendorLicenseUploaded) ...
+                [
+                  const SizedBox(width: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: Colors.green,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: const Text(
+                      '✓ UPLOADED',
+                      style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+            const SizedBox(height: 16),
+            if (_vendorLicenseFile != null)
+              Container(
+                height: 200,
+                width: double.infinity,
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.grey),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: Image.file(_vendorLicenseFile!, fit: BoxFit.cover),
+                ),
+              ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: _isUploadingVendorLicense ? null : () => _showVendorLicenseDialog(),
+                    icon: _isUploadingVendorLicense
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.upload_file),
+                    label: Text(_isUploadingVendorLicense 
+                        ? 'Uploading...' 
+                        : _isVendorLicenseUploaded 
+                          ? '✓ License Uploaded' 
+                          : 'Upload Vendor License'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: _isVendorLicenseUploaded ? Colors.green : const Color(0xFF607D8B),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildSubmitButton() {
+    bool canSubmit = _isVehiclePhotoUploaded && _isVendorLicenseUploaded;
     return SizedBox(
       width: double.infinity,
       child: ElevatedButton(
-        onPressed: _isProcessing ? null : _submitForm,
+        onPressed: _isProcessing ? null : (canSubmit ? _submitForm : null),
         style: ElevatedButton.styleFrom(
-          backgroundColor: _isLicenseUploaded ? const Color(0xFF607D8B) : Colors.grey,
+          backgroundColor: canSubmit ? const Color(0xFF607D8B) : Colors.grey,
           foregroundColor: Colors.white,
           padding: const EdgeInsets.symmetric(vertical: 16),
           shape: RoundedRectangleBorder(
@@ -1569,11 +1955,11 @@ class _MetalsPageState extends State<MetalsPage> with TickerProviderStateMixin {
                 ],
               )
             : Text(
-                _isLicenseUploaded ? 'Submit Metals Data' : 'Upload License First',
+                canSubmit ? 'Submit Metals Data' : 'Upload Photos First',
                 style: TextStyle(
                   fontSize: 18, 
                   fontWeight: FontWeight.bold,
-                  color: _isLicenseUploaded ? Colors.white : Colors.white70
+                  color: canSubmit ? Colors.white : Colors.white70
                 ),
               ),
       ),
@@ -1744,27 +2130,33 @@ class _MetalsPageState extends State<MetalsPage> with TickerProviderStateMixin {
     return Card(
       elevation: 4,
       child: Padding(
-        padding: const EdgeInsets.all(16.0),
+        padding: const EdgeInsets.all(12.0),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 32, color: color),
-            const SizedBox(height: 8),
+            Icon(icon, size: 28, color: color),
+            const SizedBox(height: 6),
             Text(
               value,
               style: TextStyle(
-                fontSize: 20,
+                fontSize: 18,
                 fontWeight: FontWeight.bold,
                 color: color,
               ),
             ),
-            Text(
-              title,
-              style: const TextStyle(
-                fontSize: 12,
-                color: Colors.grey,
+            const SizedBox(height: 2),
+            Flexible(
+              child: Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 11,
+                  color: Colors.grey,
+                ),
+                textAlign: TextAlign.center,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
               ),
-              textAlign: TextAlign.center,
             ),
           ],
         ),
@@ -1809,7 +2201,7 @@ class _MetalsPageState extends State<MetalsPage> with TickerProviderStateMixin {
                 cells: [
                   DataCell(Text(submission['date'] ?? 'N/A')),
                   DataCell(Text(submission['vehicle_number'] ?? 'N/A')),
-                  DataCell(Text(submission['material_category'] ?? 'Metals')),
+                  DataCell(Text('Metals')),
                   DataCell(Text(submission['driver_number'] ?? 'N/A')),
                   DataCell(Text(submission['gross_weight'] ?? 'N/A')),
                   DataCell(Text(submission['net_weight'] ?? 'N/A')),

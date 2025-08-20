@@ -1,8 +1,13 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:intl/intl.dart';
 import 'dart:convert';
+
 import 'package:http/http.dart' as http;
 import 'package:fl_chart/fl_chart.dart';
+import 'package:image_picker/image_picker.dart';
+import 'dart:io';
+import 'dart:async';
 
 const String baseUrl = 'http://54.146.215.18:3000';
 
@@ -14,13 +19,21 @@ class MunicipalSolidWasteDetailsPage extends StatefulWidget {
 }
 
 class _MunicipalSolidWasteDetailsPageState extends State<MunicipalSolidWasteDetailsPage> 
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
+  // Animation Controllers
+  late AnimationController _animationController;
+  late AnimationController _pulseAnimationController;
+  late Animation<double> _fadeAnimation;
+  late Animation<Offset> _slideAnimation;
+  late Animation<double> _pulseAnimation;
+  
   // Tab Controller
   late TabController _tabController;
   
   // State variables
   bool _isLoading = false;
   bool _isRefreshing = false;
+  bool _isUploading = false;
   
   // Form state
   final _formKey = GlobalKey<FormState>();
@@ -28,17 +41,26 @@ class _MunicipalSolidWasteDetailsPageState extends State<MunicipalSolidWasteDeta
   final _housesController = TextEditingController();
   final _employeesController = TextEditingController();
   
+  // File upload state
+  File? _vendorLicenseFile;
+  File? _disposalPhotoFile;
+  final ImagePicker _imagePicker = ImagePicker();
+  
   // Data storage
   List<MunicipalWasteRecord> _wasteRecords = [];
   Map<String, double> _wasteStats = {};
   
-  // Waste types definition
+  // Real-time update timer
+  Timer? _refreshTimer;
+  
+  // Waste types definition with enhanced styling
   final List<Map<String, dynamic>> _wasteTypes = [
     {
       'key': 'dry',
       'name': 'Dry Waste',
-      'icon': Icons.dry_cleaning,
+      'icon': Icons.dry_cleaning_outlined,
       'color': Colors.orange,
+      'gradient': [Colors.orange.shade400, Colors.orange.shade600],
       'generatedController': TextEditingController(),
       'disposedToController': TextEditingController(),
       'quantityController': TextEditingController(),
@@ -46,8 +68,9 @@ class _MunicipalSolidWasteDetailsPageState extends State<MunicipalSolidWasteDeta
     {
       'key': 'wet',
       'name': 'Wet Waste',
-      'icon': Icons.water_drop,
+      'icon': Icons.water_drop_outlined,
       'color': Colors.blue,
+      'gradient': [Colors.blue.shade400, Colors.blue.shade600],
       'generatedController': TextEditingController(),
       'disposedToController': TextEditingController(),
       'quantityController': TextEditingController(),
@@ -55,8 +78,9 @@ class _MunicipalSolidWasteDetailsPageState extends State<MunicipalSolidWasteDeta
     {
       'key': 'sanitary_napkins',
       'name': 'Sanitary Napkins',
-      'icon': Icons.health_and_safety,
+      'icon': Icons.health_and_safety_outlined,
       'color': Colors.pink,
+      'gradient': [Colors.pink.shade400, Colors.pink.shade600],
       'generatedController': TextEditingController(),
       'disposedToController': TextEditingController(),
       'quantityController': TextEditingController(),
@@ -64,8 +88,9 @@ class _MunicipalSolidWasteDetailsPageState extends State<MunicipalSolidWasteDeta
     {
       'key': 'e_waste',
       'name': 'E-Waste',
-      'icon': Icons.electrical_services,
+      'icon': Icons.electrical_services_outlined,
       'color': Colors.green,
+      'gradient': [Colors.green.shade400, Colors.green.shade600],
       'generatedController': TextEditingController(),
       'disposedToController': TextEditingController(),
       'quantityController': TextEditingController(),
@@ -73,8 +98,9 @@ class _MunicipalSolidWasteDetailsPageState extends State<MunicipalSolidWasteDeta
     {
       'key': 'bio_medical_waste',
       'name': 'Bio Medical Waste',
-      'icon': Icons.medical_services,
+      'icon': Icons.medical_services_outlined,
       'color': Colors.red,
+      'gradient': [Colors.red.shade400, Colors.red.shade600],
       'generatedController': TextEditingController(),
       'disposedToController': TextEditingController(),
       'quantityController': TextEditingController(),
@@ -82,8 +108,9 @@ class _MunicipalSolidWasteDetailsPageState extends State<MunicipalSolidWasteDeta
     {
       'key': 'battery_waste',
       'name': 'Battery Waste',
-      'icon': Icons.battery_alert,
+      'icon': Icons.battery_alert_outlined,
       'color': Colors.amber,
+      'gradient': [Colors.amber.shade400, Colors.amber.shade600],
       'generatedController': TextEditingController(),
       'disposedToController': TextEditingController(),
       'quantityController': TextEditingController(),
@@ -91,8 +118,9 @@ class _MunicipalSolidWasteDetailsPageState extends State<MunicipalSolidWasteDeta
     {
       'key': 'others',
       'name': 'Others',
-      'icon': Icons.category,
+      'icon': Icons.category_outlined,
       'color': Colors.grey,
+      'gradient': [Colors.grey.shade400, Colors.grey.shade600],
       'generatedController': TextEditingController(),
       'disposedToController': TextEditingController(),
       'quantityController': TextEditingController(),
@@ -102,12 +130,63 @@ class _MunicipalSolidWasteDetailsPageState extends State<MunicipalSolidWasteDeta
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 3, vsync: this);
+    _initializeAnimations();
+    _tabController = TabController(length: 4, vsync: this);
     _fetchInitialData();
+    _startRealTimeUpdates();
+  }
+  
+  void _initializeAnimations() {
+    _animationController = AnimationController(
+      duration: const Duration(milliseconds: 1500),
+      vsync: this,
+    );
+    
+    _pulseAnimationController = AnimationController(
+      duration: const Duration(seconds: 2),
+      vsync: this,
+    )..repeat(reverse: true);
+    
+    _fadeAnimation = Tween<double>(
+      begin: 0.0,
+      end: 1.0,
+    ).animate(CurvedAnimation(
+      parent: _animationController,
+      curve: Curves.easeInOut,
+    ));
+    
+    _slideAnimation = Tween<Offset>(
+      begin: const Offset(0, 0.3),
+      end: Offset.zero,
+    ).animate(CurvedAnimation(
+      parent: _animationController,
+      curve: Curves.easeOutCubic,
+    ));
+    
+    _pulseAnimation = Tween<double>(
+      begin: 1.0,
+      end: 1.1,
+    ).animate(CurvedAnimation(
+      parent: _pulseAnimationController,
+      curve: Curves.easeInOut,
+    ));
+    
+    _animationController.forward();
+  }
+  
+  void _startRealTimeUpdates() {
+    _refreshTimer = Timer.periodic(const Duration(minutes: 2), (timer) {
+      if (mounted && !_isLoading && !_isRefreshing) {
+        _refreshData();
+      }
+    });
   }
   
   @override
   void dispose() {
+    _animationController.dispose();
+    _pulseAnimationController.dispose();
+    _refreshTimer?.cancel();
     _housesController.dispose();
     _employeesController.dispose();
     for (var wasteType in _wasteTypes) {
@@ -132,6 +211,80 @@ class _MunicipalSolidWasteDetailsPageState extends State<MunicipalSolidWasteDeta
       return parsed != null && !parsed.isNaN && !parsed.isInfinite ? parsed : 0.0;
     }
     return 0.0;
+  }
+  
+  // File Upload Methods
+  Future<void> _pickVendorLicense() async {
+    try {
+      final XFile? pickedFile = await _imagePicker.pickImage(
+        source: ImageSource.gallery,
+        maxWidth: 1920,
+        maxHeight: 1080,
+        imageQuality: 85,
+      );
+      
+      if (pickedFile != null) {
+        setState(() {
+          _vendorLicenseFile = File(pickedFile.path);
+        });
+        _showSuccess('Vendor license selected successfully');
+      }
+    } catch (e) {
+      _showError('Error selecting vendor license: $e');
+    }
+  }
+
+  Future<void> _pickDisposalPhoto() async {
+    try {
+      final XFile? pickedFile = await _imagePicker.pickImage(
+        source: ImageSource.camera,
+        maxWidth: 1920,
+        maxHeight: 1080,
+        imageQuality: 85,
+      );
+      
+      if (pickedFile != null) {
+        setState(() {
+          _disposalPhotoFile = File(pickedFile.path);
+        });
+        _showSuccess('Disposal photo captured successfully');
+      }
+    } catch (e) {
+      _showError('Error capturing disposal photo: $e');
+    }
+  }
+
+  Future<String?> _uploadFileToS3(File file, String fileName) async {
+    try {
+      setState(() => _isUploading = true);
+      
+      var request = http.MultipartRequest(
+        'POST',
+        Uri.http('54.146.215.18:3000', '/upload-municipal-waste-document'),
+      );
+      
+      request.files.add(
+        await http.MultipartFile.fromPath('document', file.path, filename: fileName),
+      );
+      
+      request.fields['document_type'] = fileName.contains('license') ? 'vendor_license' : 'disposal_photo';
+      request.fields['upload_date'] = DateFormat('yyyy-MM-dd').format(DateTime.now());
+      
+      final streamedResponse = await request.send();
+      final response = await http.Response.fromStream(streamedResponse);
+      
+      if (response.statusCode == 200) {
+        final responseData = json.decode(response.body);
+        return responseData['data']['s3_url'];
+      } else {
+        throw Exception('Upload failed: ${response.body}');
+      }
+    } catch (e) {
+      _showError('File upload error: $e');
+      return null;
+    } finally {
+      setState(() => _isUploading = false);
+    }
   }
   
   // API Methods
@@ -171,19 +324,15 @@ class _MunicipalSolidWasteDetailsPageState extends State<MunicipalSolidWasteDeta
         Uri.http('54.146.215.18:3000', '/municipal-solid-waste', {'limit': '50'}),
       );
       
-      print('Fetch records status: ${response.statusCode}');
-      
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
-        print('Records response: $data');
-        
         setState(() {
           _wasteRecords = (data['data'] as List? ?? [])
               .map((json) => MunicipalWasteRecord.fromJson(json))
               .toList();
         });
       } else {
-        throw Exception('Failed to load waste records: ${response.statusCode} - ${response.reasonPhrase}');
+        throw Exception('Failed to load waste records: ${response.statusCode}');
       }
     } catch (e) {
       print('Error fetching waste records: $e');
@@ -197,12 +346,8 @@ class _MunicipalSolidWasteDetailsPageState extends State<MunicipalSolidWasteDeta
         Uri.http('54.146.215.18:3000', '/municipal-solid-waste/stats'),
       );
       
-      print('Fetch stats status: ${response.statusCode}');
-      
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
-        print('Stats response: $data');
-        
         final summary = data['summary'];
         if (summary != null) {
           setState(() {
@@ -214,30 +359,48 @@ class _MunicipalSolidWasteDetailsPageState extends State<MunicipalSolidWasteDeta
               'avgHousesOccupied': _safeParseDouble(summary['avg_houses_occupied']),
             };
           });
-        } else {
-          print('Summary is null in stats response');
         }
-      } else {
-        print('Stats API error: ${response.statusCode} - ${response.body}');
       }
     } catch (e) {
       print('Error fetching stats: $e');
-      // Don't rethrow as stats are not critical
     }
   }
   
   Future<void> _submitWasteData() async {
     if (!_formKey.currentState!.validate()) return;
     
+    // MANDATORY: Check if vendor license is uploaded
+    if (_vendorLicenseFile == null) {
+      _showError('Vendor license upload is mandatory for every waste disposal entry');
+      return;
+    }
+    
     setState(() => _isLoading = true);
     try {
+      // Upload files first if selected
+      String? vendorLicenseUrl;
+      String? disposalPhotoUrl;
+      
+      if (_vendorLicenseFile != null) {
+        vendorLicenseUrl = await _uploadFileToS3(
+          _vendorLicenseFile!,
+          'vendor_license_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.jpg',
+        );
+      }
+      
+      if (_disposalPhotoFile != null) {
+        disposalPhotoUrl = await _uploadFileToS3(
+          _disposalPhotoFile!,
+          'disposal_photo_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.jpg',
+        );
+      }
+      
       final numEmployees = int.tryParse(_employeesController.text) ?? 0;
       final employeeGeneratedWaste = numEmployees * 0.1;
       final wasteData = {
         'date': DateFormat('yyyy-MM-dd').format(_selectedDate),
         'no_of_houses_occupied': int.parse(_housesController.text),
         'num_employees': numEmployees,
-        // employee_generated_waste is calculated and stored in backend, but can be sent for display
         'employee_generated_waste': employeeGeneratedWaste,
       };
       
@@ -249,16 +412,19 @@ class _MunicipalSolidWasteDetailsPageState extends State<MunicipalSolidWasteDeta
         wasteData['${key}_quantity'] = _safeParseDouble(wasteType['quantityController'].text);
       }
       
-      print('Submitting waste data: $wasteData');
+      // Add file URLs if uploaded
+      if (vendorLicenseUrl != null) {
+        wasteData['vendor_license_url'] = vendorLicenseUrl;
+      }
+      if (disposalPhotoUrl != null) {
+        wasteData['disposal_photo_url'] = disposalPhotoUrl;
+      }
       
       final response = await http.post(
         Uri.http('54.146.215.18:3000', '/municipal-solid-waste'),
         headers: {'Content-Type': 'application/json'},
         body: json.encode(wasteData),
       );
-      
-      print('Submit response status: ${response.statusCode}');
-      print('Submit response body: ${response.body}');
       
       if (response.statusCode == 201) {
         _showSuccess('Municipal solid waste data saved successfully');
@@ -309,10 +475,13 @@ class _MunicipalSolidWasteDetailsPageState extends State<MunicipalSolidWasteDeta
     }
     setState(() {
       _selectedDate = DateTime.now();
+      _vendorLicenseFile = null;
+      _disposalPhotoFile = null;
     });
   }
   
   void _showSuccess(String message) {
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Row(
@@ -325,11 +494,13 @@ class _MunicipalSolidWasteDetailsPageState extends State<MunicipalSolidWasteDeta
         backgroundColor: Colors.green,
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        margin: const EdgeInsets.all(16),
       ),
     );
   }
   
   void _showError(String message) {
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Row(
@@ -342,6 +513,7 @@ class _MunicipalSolidWasteDetailsPageState extends State<MunicipalSolidWasteDeta
         backgroundColor: Colors.red,
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        margin: const EdgeInsets.all(16),
       ),
     );
   }
@@ -356,7 +528,7 @@ class _MunicipalSolidWasteDetailsPageState extends State<MunicipalSolidWasteDeta
         return Theme(
           data: Theme.of(context).copyWith(
             colorScheme: ColorScheme.light(
-              primary: const Color(0xFF00796B),
+              primary: const Color(0xFF2D5A5A),
               onPrimary: Colors.white,
               surface: Colors.white,
             ),
@@ -377,7 +549,14 @@ class _MunicipalSolidWasteDetailsPageState extends State<MunicipalSolidWasteDeta
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Delete Record'),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Row(
+          children: const [
+            Icon(Icons.warning_amber_rounded, color: Colors.red),
+            SizedBox(width: 8),
+            Text('Delete Record'),
+          ],
+        ),
         content: const Text('Are you sure you want to delete this waste record? This action cannot be undone.'),
         actions: [
           TextButton(
@@ -392,6 +571,7 @@ class _MunicipalSolidWasteDetailsPageState extends State<MunicipalSolidWasteDeta
             style: ElevatedButton.styleFrom(
               backgroundColor: Colors.red,
               foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
             ),
             child: const Text('Delete'),
           ),
@@ -407,48 +587,77 @@ class _MunicipalSolidWasteDetailsPageState extends State<MunicipalSolidWasteDeta
         primarySwatch: Colors.teal,
         appBarTheme: const AppBarTheme(
           elevation: 0,
-          backgroundColor: Color(0xFF00796B),
+          backgroundColor: Color(0xFF2D5A5A),
           foregroundColor: Colors.white,
         ),
         elevatedButtonTheme: ElevatedButtonThemeData(
           style: ElevatedButton.styleFrom(
-            backgroundColor: const Color(0xFF00796B),
+            backgroundColor: const Color(0xFF2D5A5A),
             foregroundColor: Colors.white,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+            elevation: 2,
           ),
         ),
         cardTheme: CardTheme(
-          elevation: 2,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          elevation: 4,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
           clipBehavior: Clip.antiAlias,
         ),
         tabBarTheme: const TabBarTheme(
           labelColor: Colors.white,
           unselectedLabelColor: Colors.white70,
-          indicator: BoxDecoration(
-            border: Border(bottom: BorderSide(color: Colors.white, width: 3)),
+          indicator: UnderlineTabIndicator(
+            borderSide: BorderSide(color: Colors.white, width: 3),
+            insets: EdgeInsets.symmetric(horizontal: 16),
           ),
         ),
       ),
       child: Scaffold(
-        appBar: AppBar(
-          title: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: const [
-              Icon(Icons.delete_outline, size: 24),
-              SizedBox(width: 8),
-              Flexible(
-                child: Text(
-                  'Municipal Solid Waste',
-                  style: TextStyle(fontWeight: FontWeight.bold),
-                  overflow: TextOverflow.ellipsis,
+        appBar: _buildAppBar(),
+        body: _isLoading
+            ? _buildLoadingIndicator()
+            : FadeTransition(
+                opacity: _fadeAnimation,
+                child: SlideTransition(
+                  position: _slideAnimation,
+                  child: TabBarView(
+                    controller: _tabController,
+                    children: [
+                      _buildAddRecordTab(),
+                      _buildHistoryTab(),
+                      _buildAnalyticsTab(),
+                      _buildDocumentsTab(),
+                    ],
+                  ),
                 ),
               ),
-            ],
+      ),
+    );
+  }
+  
+  PreferredSizeWidget _buildAppBar() {
+    return AppBar(
+      title: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: const [
+          Icon(Icons.delete_outline_rounded, size: 28),
+          SizedBox(width: 12),
+          Flexible(
+            child: Text(
+              'Municipal Solid Waste',
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 20),
+              overflow: TextOverflow.ellipsis,
+            ),
           ),
-          actions: [
-            _isRefreshing
+        ],
+      ),
+      actions: [
+        ScaleTransition(
+          scale: _pulseAnimation,
+          child: Container(
+            margin: const EdgeInsets.only(right: 8),
+            child: _isRefreshing
                 ? const Padding(
                     padding: EdgeInsets.all(16.0),
                     child: SizedBox(
@@ -461,58 +670,160 @@ class _MunicipalSolidWasteDetailsPageState extends State<MunicipalSolidWasteDeta
                     ),
                   )
                 : IconButton(
-                    icon: const Icon(Icons.refresh),
+                    icon: const Icon(Icons.refresh_rounded),
                     onPressed: _refreshData,
                     tooltip: 'Refresh Data',
+                    style: IconButton.styleFrom(
+                      backgroundColor: Colors.white.withOpacity(0.1),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    ),
                   ),
-          ],
-          bottom: TabBar(
-            controller: _tabController,
-            tabs: const [
-              Tab(icon: Icon(Icons.add), text: 'Add Record'),
-              Tab(icon: Icon(Icons.history), text: 'History'),
-              Tab(icon: Icon(Icons.analytics), text: 'Analytics'),
-            ],
           ),
         ),
-        body: _isLoading
-            ? const Center(child: CircularProgressIndicator())
-            : TabBarView(
-                controller: _tabController,
-                children: [
-                  _buildAddRecordTab(),
-                  _buildHistoryTab(),
-                  _buildAnalyticsTab(),
-                ],
+      ],
+      bottom: TabBar(
+        controller: _tabController,
+        tabs: const [
+          Tab(icon: Icon(Icons.add_circle_outline), text: 'Add Record'),
+          Tab(icon: Icon(Icons.history_rounded), text: 'History'),
+          Tab(icon: Icon(Icons.analytics_outlined), text: 'Analytics'),
+          Tab(icon: Icon(Icons.folder_outlined), text: 'Documents'),
+        ],
+      ),
+    );
+  }
+  
+  Widget _buildLoadingIndicator() {
+    return Container(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [
+            const Color(0xFF2D5A5A).withOpacity(0.1),
+            Colors.white,
+          ],
+        ),
+      ),
+      child: const Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            CircularProgressIndicator(
+              strokeWidth: 3,
+              valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF2D5A5A)),
+            ),
+            SizedBox(height: 16),
+            Text(
+              'Loading waste management data...',
+              style: TextStyle(
+                fontSize: 16,
+                color: Color(0xFF2D5A5A),
+                fontWeight: FontWeight.w500,
               ),
+            ),
+          ],
+        ),
       ),
     );
   }
   
   Widget _buildAddRecordTab() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Form(
-        key: _formKey,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _buildBasicInfoCard(),
-            const SizedBox(height: 16),
-            _buildWasteTableCard(),
-            const SizedBox(height: 24),
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton.icon(
-                onPressed: _submitWasteData,
-                icon: const Icon(Icons.save),
-                label: const Text('Save Waste Data', style: TextStyle(fontSize: 16)),
-                style: ElevatedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 16),
+    return Container(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [
+            const Color(0xFFF0F8FF),
+            Colors.white,
+          ],
+        ),
+      ),
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(20),
+        child: Form(
+          key: _formKey,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _buildDateSelector(),
+              const SizedBox(height: 20),
+              _buildBasicInfoCard(),
+              const SizedBox(height: 20),
+              _buildWasteTableCard(),
+              const SizedBox(height: 20),
+              _buildFileUploadSection(),
+              const SizedBox(height: 30),
+              _buildSubmitButton(),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+  
+  Widget _buildDateSelector() {
+    return Card(
+      elevation: 3,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Container(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(16),
+          gradient: LinearGradient(
+            colors: [Colors.blue.shade50, Colors.white],
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF2D5A5A).withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Icon(
+                  Icons.calendar_today_rounded,
+                  color: Color(0xFF2D5A5A),
+                  size: 24,
                 ),
               ),
-            ),
-          ],
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Select Date',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF2D5A5A),
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      DateFormat('EEEE, MMMM d, yyyy').format(_selectedDate),
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              ElevatedButton.icon(
+                onPressed: _selectDate,
+                icon: const Icon(Icons.edit_calendar),
+                label: const Text('Change'),
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -520,351 +831,700 @@ class _MunicipalSolidWasteDetailsPageState extends State<MunicipalSolidWasteDeta
   
   Widget _buildBasicInfoCard() {
     return Card(
-      elevation: 2,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: TextFormField(
-                    controller: _housesController,
-                    decoration: InputDecoration(
-                      labelText: 'No. of Houses Occupied',
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                      prefixIcon: const Icon(Icons.home, color: Color(0xFF00796B)),
-                    ),
-                    keyboardType: TextInputType.number,
-                    validator: (value) {
-                      if (value == null || value.isEmpty) {
-                        return 'Required';
-                      }
-                      if (int.tryParse(value) == null) {
-                        return 'Invalid number';
-                      }
-                      return null;
-                    },
-                  ),
-                ),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: TextFormField(
-                    controller: _employeesController,
-                    decoration: InputDecoration(
-                      labelText: 'No. of Employees',
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                      prefixIcon: const Icon(Icons.people, color: Color(0xFF00796B)),
-                    ),
-                    keyboardType: TextInputType.number,
-                    validator: (value) {
-                      if (value == null || value.isEmpty) {
-                        return 'Required';
-                      }
-                      if (int.tryParse(value) == null) {
-                        return 'Invalid number';
-                      }
-                      return null;
-                    },
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Builder(
-              builder: (context) {
-                final numEmployees = int.tryParse(_employeesController.text) ?? 0;
-                final employeeGeneratedWaste = numEmployees * 0.1;
-                return Text(
-                  'Employee Waste (100g/employee): ${employeeGeneratedWaste.toStringAsFixed(2)} kg',
-                  style: const TextStyle(fontSize: 13, color: Colors.teal, fontWeight: FontWeight.w500),
-                );
-              },
-            ),
-          ],
+      elevation: 3,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Container(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(16),
+          gradient: LinearGradient(
+            colors: [Colors.green.shade50, Colors.white],
+          ),
         ),
-      ),
-    );
-  }
-  
-  Widget _buildWasteTableCard() {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: const [
-                Icon(Icons.delete_outline, color: Color(0xFF00796B)),
-                SizedBox(width: 8),
-                Text(
-                  'Waste Generated (in Kg)',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF00796B)),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            
-            // Table Header
-            Container(
-              decoration: BoxDecoration(
-                color: const Color(0xFFE0F2F1),
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: const Color(0xFF00796B), width: 1),
-              ),
-              child: Table(
-                columnWidths: const {
-                  0: FlexColumnWidth(2),
-                  1: FlexColumnWidth(1.5),
-                  2: FlexColumnWidth(2),
-                  3: FlexColumnWidth(1.5),
-                },
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
                 children: [
-                  TableRow(
-                    children: [
-                      _buildTableHeader('Waste Type'),
-                      _buildTableHeader('Generated\nQty'),
-                      _buildTableHeader('Disposed To'),
-                      _buildTableHeader('Quantity'),
-                    ],
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF2D5A5A).withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: const Icon(
+                      Icons.info_outline_rounded,
+                      color: Color(0xFF2D5A5A),
+                      size: 24,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  const Text(
+                    'Basic Information',
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                      color: Color(0xFF2D5A5A),
+                    ),
                   ),
                 ],
               ),
-            ),
-            
-            // Table Body
-            Container(
-              decoration: BoxDecoration(
-                border: Border.all(color: Colors.grey.shade300),
-                borderRadius: const BorderRadius.only(
-                  bottomLeft: Radius.circular(8),
-                  bottomRight: Radius.circular(8),
-                ),
+              const SizedBox(height: 20),
+              Row(
+                children: [
+                  Expanded(
+                    child: _buildEnhancedTextField(
+                      controller: _housesController,
+                      label: 'Number of Houses Occupied',
+                      icon: Icons.home_rounded,
+                      keyboardType: TextInputType.number,
+                      validator: (value) {
+                        if (value == null || value.isEmpty) return 'Required';
+                        if (int.tryParse(value) == null) return 'Invalid number';
+                        return null;
+                      },
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: _buildEnhancedTextField(
+                      controller: _employeesController,
+                      label: 'Number of Employees',
+                      icon: Icons.people_rounded,
+                      keyboardType: TextInputType.number,
+                      validator: (value) {
+                        if (value == null || value.isEmpty) return 'Required';
+                        if (int.tryParse(value) == null) return 'Invalid number';
+                        return null;
+                      },
+                    ),
+                  ),
+                ],
               ),
-              child: Table(
-                columnWidths: const {
-                  0: FlexColumnWidth(2),
-                  1: FlexColumnWidth(1.5),
-                  2: FlexColumnWidth(2),
-                  3: FlexColumnWidth(1.5),
-                },
-                children: _wasteTypes.map((wasteType) => _buildTableRow(wasteType)).toList(),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-  
-  Widget _buildTableHeader(String text) {
-    return Container(
-      padding: const EdgeInsets.all(12),
-      child: Text(
-        text,
-        style: const TextStyle(
-          fontWeight: FontWeight.bold,
-          fontSize: 14,
-          color: Color(0xFF00796B),
-        ),
-        textAlign: TextAlign.center,
-      ),
-    );
-  }
-  
-  TableRow _buildTableRow(Map<String, dynamic> wasteType) {
-    return TableRow(
-      decoration: BoxDecoration(
-        border: Border(
-          bottom: BorderSide(color: Colors.grey.shade200),
-        ),
-      ),
-      children: [
-        // Waste Type Name with Icon
-        Container(
-          padding: const EdgeInsets.all(8),
-          child: Row(
-            children: [
+              const SizedBox(height: 16),
               Container(
-                padding: const EdgeInsets.all(6),
+                padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
-                  color: (wasteType['color'] as Color).withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(6),
+                  color: const Color(0xFF2D5A5A).withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: const Color(0xFF2D5A5A).withOpacity(0.3)),
                 ),
-                child: Icon(
-                  wasteType['icon'] as IconData,
-                  color: wasteType['color'] as Color,
-                  size: 16,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  wasteType['name'] as String,
-                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
-                  overflow: TextOverflow.ellipsis,
+                child: Row(
+                  children: [
+                    const Icon(
+                      Icons.info_outline,
+                      color: Color(0xFF2D5A5A),
+                      size: 20,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Builder(
+                        builder: (context) {
+                          final numEmployees = int.tryParse(_employeesController.text) ?? 0;
+                          final employeeGeneratedWaste = numEmployees * 0.1;
+                          return Text(
+                            'Employee Generated Waste (100g/employee): ${employeeGeneratedWaste.toStringAsFixed(2)} kg',
+                            style: const TextStyle(
+                              fontSize: 14,
+                              color: Color(0xFF2D5A5A),
+                              fontWeight: FontWeight.w600,
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ],
           ),
         ),
-        
-        // Generated Quantity
-        Container(
-          padding: const EdgeInsets.all(4),
-          child: TextFormField(
-            controller: wasteType['generatedController'],
-            decoration: const InputDecoration(
-              hintText: '0.0',
-              border: OutlineInputBorder(),
-              contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-              isDense: true,
-            ),
-            keyboardType: TextInputType.number,
-            style: const TextStyle(fontSize: 12),
-          ),
-        ),
-        
-        // Disposed To
-        Container(
-          padding: const EdgeInsets.all(4),
-          child: TextFormField(
-            controller: wasteType['disposedToController'],
-            decoration: const InputDecoration(
-              hintText: 'Location/Method',
-              border: OutlineInputBorder(),
-              contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-              isDense: true,
-            ),
-            style: const TextStyle(fontSize: 12),
-          ),
-        ),
-        
-        // Quantity
-        Container(
-          padding: const EdgeInsets.all(4),
-          child: TextFormField(
-            controller: wasteType['quantityController'],
-            decoration: const InputDecoration(
-              hintText: '0.0',
-              border: OutlineInputBorder(),
-              contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-              isDense: true,
-            ),
-            keyboardType: TextInputType.number,
-            style: const TextStyle(fontSize: 12),
-          ),
-        ),
-      ],
+      ),
     );
   }
   
-  Widget _buildHistoryTab() {
-    if (_wasteRecords.isEmpty) {
-      return const Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.history, color: Colors.grey, size: 64),
-            SizedBox(height: 16),
-            Text(
-              'No waste records found',
-              style: TextStyle(fontSize: 18, color: Colors.grey, fontWeight: FontWeight.bold),
-            ),
-            SizedBox(height: 8),
-            Text(
-              'Add your first record using the "Add Record" tab',
-              style: TextStyle(color: Colors.grey),
-            ),
-          ],
+  Widget _buildEnhancedTextField({
+    required TextEditingController controller,
+    required String label,
+    required IconData icon,
+    TextInputType? keyboardType,
+    String? Function(String?)? validator,
+  }) {
+    return TextFormField(
+      controller: controller,
+      keyboardType: keyboardType,
+      validator: validator,
+      decoration: InputDecoration(
+        labelText: label,
+        prefixIcon: Icon(icon, color: const Color(0xFF2D5A5A)),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide(color: Colors.grey.shade300),
         ),
-      );
-    }
-    
-    return ListView.builder(
-      padding: const EdgeInsets.all(16),
-      itemCount: _wasteRecords.length,
-      itemBuilder: (context, index) {
-        final record = _wasteRecords[index];
-        return Card(
-          margin: const EdgeInsets.only(bottom: 16),
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Icon(Icons.calendar_today, size: 16, color: Colors.teal[700]),
-                    const SizedBox(width: 8),
-                    Text(DateFormat('yyyy-MM-dd').format(record.date), style: const TextStyle(fontWeight: FontWeight.bold)),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                Text('No. of Houses: ${record.noOfHousesOccupied}'),
-                Text('No. of Employees: ${record.numEmployees}'),
-                Text('Employee Waste: ${record.employeeGeneratedWaste.toStringAsFixed(2)} kg'),
-                // ... add more fields as needed ...
-              ],
-            ),
-          ),
-        );
-      },
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide(color: Colors.grey.shade300),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: Color(0xFF2D5A5A), width: 2),
+        ),
+        filled: true,
+        fillColor: Colors.white,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+      ),
+      onChanged: (value) => setState(() {}), // Trigger rebuild for employee waste calculation
     );
   }
   
-  Widget _buildHistoryCard(MunicipalWasteRecord record) {
+  Widget _buildWasteTableCard() {
     return Card(
-      margin: const EdgeInsets.only(bottom: 12),
+      elevation: 3,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Container(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(16),
+          gradient: LinearGradient(
+            colors: [Colors.orange.shade50, Colors.white],
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF2D5A5A).withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: const Icon(
+                      Icons.delete_outline_rounded,
+                      color: Color(0xFF2D5A5A),
+                      size: 24,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  const Text(
+                    'Waste Generated (in Kg)',
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                      color: Color(0xFF2D5A5A),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 20),
+              _buildEnhancedWasteTable(),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+  
+  Widget _buildEnhancedWasteTable() {
+    return Column(
+      children: _wasteTypes.map((wasteType) => _buildWasteTypeRow(wasteType)).toList(),
+    );
+  }
+  
+  Widget _buildWasteTypeRow(Map<String, dynamic> wasteType) {
+    final gradient = wasteType['gradient'] as List<Color>;
+    
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        gradient: LinearGradient(
+          colors: [gradient[0].withOpacity(0.1), Colors.white],
+        ),
+        border: Border.all(color: gradient[0].withOpacity(0.3)),
+      ),
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Row(
-                  children: [
-                    const Icon(Icons.calendar_today, size: 16, color: Color(0xFF00796B)),
-                    const SizedBox(width: 8),
-                    Text(
-                      DateFormat('MMMM d, yyyy').format(record.date),
-                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-                    ),
-                  ],
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(colors: gradient),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Icon(
+                    wasteType['icon'] as IconData,
+                    color: Colors.white,
+                    size: 20,
+                  ),
                 ),
-                Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFE0F2F1),
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                      child: Text(
-                        '${record.noOfHousesOccupied} Houses',
-                        style: const TextStyle(
-                          color: Color(0xFF00796B),
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.delete_outline, color: Colors.red),
-                      onPressed: () => _showDeleteConfirmation(record.id),
-                      tooltip: 'Delete record',
-                    ),
-                  ],
+                const SizedBox(width: 12),
+                Text(
+                  wasteType['name'] as String,
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFF2D5A5A),
+                  ),
                 ),
               ],
             ),
-            const Divider(),
-            _buildHistoryTable(record),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(
+                  child: _buildCompactTextField(
+                    controller: wasteType['generatedController'],
+                    label: 'Generated Qty',
+                    hint: '0.0',
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  flex: 2,
+                  child: _buildCompactTextField(
+                    controller: wasteType['disposedToController'],
+                    label: 'Disposed To',
+                    hint: 'Location/Method',
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _buildCompactTextField(
+                    controller: wasteType['quantityController'],
+                    label: 'Quantity',
+                    hint: '0.0',
+                  ),
+                ),
+              ],
+            ),
           ],
+        ),
+      ),
+    );
+  }
+  
+  Widget _buildCompactTextField({
+    required TextEditingController controller,
+    required String label,
+    required String hint,
+  }) {
+    return TextFormField(
+      controller: controller,
+      keyboardType: TextInputType.numberWithOptions(decimal: true),
+      decoration: InputDecoration(
+        labelText: label,
+        hintText: hint,
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: BorderSide(color: Colors.grey.shade300),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: BorderSide(color: Colors.grey.shade300),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: const BorderSide(color: Color(0xFF2D5A5A), width: 2),
+        ),
+        filled: true,
+        fillColor: Colors.white,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+        isDense: true,
+      ),
+      style: const TextStyle(fontSize: 14),
+    );
+  }
+  
+  Widget _buildFileUploadSection() {
+    return Card(
+      elevation: 3,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Container(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(16),
+          gradient: LinearGradient(
+            colors: [Colors.purple.shade50, Colors.white],
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF2D5A5A).withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: const Icon(
+                      Icons.cloud_upload_outlined,
+                      color: Color(0xFF2D5A5A),
+                      size: 24,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  const Text(
+                    'Upload Documents',
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                      color: Color(0xFF2D5A5A),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 20),
+              Row(
+                children: [
+                  Expanded(
+                    child: _buildFileUploadCard(
+                      title: 'Vendor License *',
+                      subtitle: 'REQUIRED: Upload vendor license',
+                      icon: Icons.assignment_outlined,
+                      file: _vendorLicenseFile,
+                      onTap: _pickVendorLicense,
+                      color: Colors.red,
+                      isRequired: true,
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: _buildFileUploadCard(
+                      title: 'Disposal Photo',
+                      subtitle: 'Capture disposal evidence',
+                      icon: Icons.camera_alt_outlined,
+                      file: _disposalPhotoFile,
+                      onTap: _pickDisposalPhoto,
+                      color: Colors.green,
+                    ),
+                  ),
+                ],
+              ),
+              if (_isUploading) ...[
+                const SizedBox(height: 16),
+                const LinearProgressIndicator(),
+                const SizedBox(height: 8),
+                const Text(
+                  'Uploading files to S3...',
+                  style: TextStyle(color: Color(0xFF2D5A5A)),
+                  textAlign: TextAlign.center,
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+  
+  Widget _buildFileUploadCard({
+    required String title,
+    required String subtitle,
+    required IconData icon,
+    required File? file,
+    required VoidCallback onTap,
+    required Color color,
+    bool isRequired = false,
+  }) {
+    final hasFile = file != null;
+    
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: hasFile 
+              ? color.withOpacity(0.1) 
+              : (isRequired && !hasFile)
+                  ? Colors.red.shade50
+                  : Colors.grey.shade100,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: hasFile 
+                ? color 
+                : (isRequired && !hasFile)
+                    ? Colors.red.shade400
+                    : Colors.grey.shade300,
+            width: (hasFile || (isRequired && !hasFile)) ? 2 : 1,
+          ),
+        ),
+        child: Column(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: hasFile 
+                    ? color 
+                    : (isRequired && !hasFile)
+                        ? Colors.red.shade400
+                        : Colors.grey.shade400,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Icon(
+                hasFile 
+                    ? Icons.check_circle_outline 
+                    : (isRequired && !hasFile)
+                        ? Icons.warning_outlined
+                        : icon,
+                color: Colors.white,
+                size: 24,
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              title,
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+                color: hasFile 
+                    ? color 
+                    : (isRequired && !hasFile)
+                        ? Colors.red.shade600
+                        : Colors.grey.shade600,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 4),
+            Text(
+              hasFile ? 'File selected' : subtitle,
+              style: TextStyle(
+                fontSize: 12,
+                color: hasFile 
+                    ? color 
+                    : (isRequired && !hasFile)
+                        ? Colors.red.shade500
+                        : Colors.grey.shade500,
+                fontWeight: (isRequired && !hasFile) ? FontWeight.w600 : FontWeight.normal,
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+  
+  Widget _buildSubmitButton() {
+    return SizedBox(
+      width: double.infinity,
+      child: ElevatedButton.icon(
+        onPressed: _isLoading || _isUploading ? null : _submitWasteData,
+        icon: _isLoading || _isUploading 
+            ? const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                ),
+              )
+            : const Icon(Icons.save_rounded, size: 24),
+        label: Text(
+          _isLoading || _isUploading ? 'Saving...' : 'Save Waste Data',
+          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+        ),
+        style: ElevatedButton.styleFrom(
+          padding: const EdgeInsets.symmetric(vertical: 20),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          elevation: 3,
+        ),
+      ),
+    );
+  }
+  
+  Widget _buildHistoryTab() {
+    if (_wasteRecords.isEmpty) {
+      return Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              const Color(0xFFF0F8FF),
+              Colors.white,
+            ],
+          ),
+        ),
+        child: const Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.history_rounded, color: Colors.grey, size: 80),
+              SizedBox(height: 24),
+              Text(
+                'No Waste Records Found',
+                style: TextStyle(
+                  fontSize: 24,
+                  color: Colors.grey,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              SizedBox(height: 12),
+              Text(
+                'Add your first record using the "Add Record" tab',
+                style: TextStyle(
+                  color: Colors.grey,
+                  fontSize: 16,
+                ),
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+    
+    return Container(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [
+            const Color(0xFFF0F8FF),
+            Colors.white,
+          ],
+        ),
+      ),
+      child: ListView.builder(
+        padding: const EdgeInsets.all(20),
+        itemCount: _wasteRecords.length,
+        itemBuilder: (context, index) {
+          final record = _wasteRecords[index];
+          return _buildEnhancedHistoryCard(record);
+        },
+      ),
+    );
+  }
+  
+  Widget _buildEnhancedHistoryCard(MunicipalWasteRecord record) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 16),
+      elevation: 4,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Container(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(16),
+          gradient: LinearGradient(
+            colors: [Colors.white, Colors.blue.shade50],
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF2D5A5A).withOpacity(0.1),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: const Icon(
+                          Icons.calendar_today_rounded,
+                          color: Color(0xFF2D5A5A),
+                          size: 20,
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            DateFormat('MMMM d, yyyy').format(record.date),
+                            style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 18,
+                              color: Color(0xFF2D5A5A),
+                            ),
+                          ),
+                          Text(
+                            DateFormat('EEEE').format(record.date),
+                            style: TextStyle(
+                              color: Colors.grey.shade600,
+                              fontSize: 14,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                  Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF2D5A5A).withOpacity(0.1),
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: Text(
+                          '${record.noOfHousesOccupied} Houses',
+                          style: const TextStyle(
+                            color: Color(0xFF2D5A5A),
+                            fontWeight: FontWeight.bold,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      IconButton(
+                        icon: const Icon(Icons.delete_outline, color: Colors.red),
+                        onPressed: () => _showDeleteConfirmation(record.id),
+                        tooltip: 'Delete record',
+                        style: IconButton.styleFrom(
+                          backgroundColor: Colors.red.withOpacity(0.1),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.green.shade50,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.green.shade200),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.people_rounded, color: Colors.green, size: 20),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Employees: ${record.numEmployees}',
+                      style: const TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                    const Spacer(),
+                    Text(
+                      'Generated: ${record.employeeGeneratedWaste.toStringAsFixed(2)} kg',
+                      style: const TextStyle(fontWeight: FontWeight.w600, color: Colors.green),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+              const Divider(),
+              const SizedBox(height: 16),
+              _buildHistoryTable(record),
+            ],
+          ),
         ),
       ),
     );
@@ -872,86 +1532,124 @@ class _MunicipalSolidWasteDetailsPageState extends State<MunicipalSolidWasteDeta
   
   Widget _buildHistoryTable(MunicipalWasteRecord record) {
     final wasteData = [
-      {'name': 'Dry', 'generated': record.dryGeneratedQuantity, 'disposed': record.dryQuantity, 'disposedTo': record.dryDisposedTo},
-      {'name': 'Wet', 'generated': record.wetGeneratedQuantity, 'disposed': record.wetQuantity, 'disposedTo': record.wetDisposedTo},
-      {'name': 'Sanitary Napkins', 'generated': record.sanitaryNapkinsGeneratedQuantity, 'disposed': record.sanitaryNapkinsQuantity, 'disposedTo': record.sanitaryNapkinsDisposedTo},
-      {'name': 'E-Waste', 'generated': record.eWasteGeneratedQuantity, 'disposed': record.eWasteQuantity, 'disposedTo': record.eWasteDisposedTo},
-      {'name': 'Bio Medical', 'generated': record.bioMedicalWasteGeneratedQuantity, 'disposed': record.bioMedicalWasteQuantity, 'disposedTo': record.bioMedicalWasteDisposedTo},
-      {'name': 'Battery', 'generated': record.batteryWasteGeneratedQuantity, 'disposed': record.batteryWasteQuantity, 'disposedTo': record.batteryWasteDisposedTo},
-      {'name': 'Others', 'generated': record.othersGeneratedQuantity, 'disposed': record.othersQuantity, 'disposedTo': record.othersDisposedTo},
+      {'name': 'Dry', 'generated': record.dryGeneratedQuantity, 'disposed': record.dryQuantity, 'disposedTo': record.dryDisposedTo, 'color': Colors.orange},
+      {'name': 'Wet', 'generated': record.wetGeneratedQuantity, 'disposed': record.wetQuantity, 'disposedTo': record.wetDisposedTo, 'color': Colors.blue},
+      {'name': 'Sanitary Napkins', 'generated': record.sanitaryNapkinsGeneratedQuantity, 'disposed': record.sanitaryNapkinsQuantity, 'disposedTo': record.sanitaryNapkinsDisposedTo, 'color': Colors.pink},
+      {'name': 'E-Waste', 'generated': record.eWasteGeneratedQuantity, 'disposed': record.eWasteQuantity, 'disposedTo': record.eWasteDisposedTo, 'color': Colors.green},
+      {'name': 'Bio Medical', 'generated': record.bioMedicalWasteGeneratedQuantity, 'disposed': record.bioMedicalWasteQuantity, 'disposedTo': record.bioMedicalWasteDisposedTo, 'color': Colors.red},
+      {'name': 'Battery', 'generated': record.batteryWasteGeneratedQuantity, 'disposed': record.batteryWasteQuantity, 'disposedTo': record.batteryWasteDisposedTo, 'color': Colors.amber},
+      {'name': 'Others', 'generated': record.othersGeneratedQuantity, 'disposed': record.othersQuantity, 'disposedTo': record.othersDisposedTo, 'color': Colors.grey},
     ];
     
-    // Filter out rows with no data
     final filteredData = wasteData.where((item) => 
       (item['generated'] as double) > 0 || (item['disposed'] as double) > 0
     ).toList();
     
     if (filteredData.isEmpty) {
-      return const Text('No waste data recorded', style: TextStyle(color: Colors.grey));
+      return Container(
+        padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(
+          color: Colors.grey.shade100,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: const Center(
+          child: Text(
+            'No waste data recorded',
+            style: TextStyle(color: Colors.grey, fontSize: 16),
+          ),
+        ),
+      );
     }
     
-    return Container(
-      decoration: BoxDecoration(
-        border: Border.all(color: Colors.grey.shade300),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Table(
-        columnWidths: const {
-          0: FlexColumnWidth(2),
-          1: FlexColumnWidth(1.5),
-          2: FlexColumnWidth(2),
-          3: FlexColumnWidth(1.5),
-        },
-        children: [
-          // Header
-          TableRow(
-            decoration: BoxDecoration(color: Colors.grey.shade100),
-            children: [
-              _buildTableCell('Waste Type', isHeader: true),
-              _buildTableCell('Generated', isHeader: true),
-              _buildTableCell('Disposed To', isHeader: true),
-              _buildTableCell('Quantity', isHeader: true),
-            ],
-          ),
-          // Data rows
-          ...filteredData.map((item) => TableRow(
-            children: [
-              _buildTableCell(item['name'] as String),
-              _buildTableCell('${(item['generated'] as double).toStringAsFixed(2)} kg'),
-              _buildTableCell(item['disposedTo'] as String),
-              _buildTableCell('${(item['disposed'] as double).toStringAsFixed(2)} kg'),
-            ],
-          )).toList(),
-        ],
-      ),
+    return Column(
+      children: filteredData.map((item) => _buildWasteDataRow(item)).toList(),
     );
   }
   
-  Widget _buildTableCell(String text, {bool isHeader = false}) {
+  Widget _buildWasteDataRow(Map<String, dynamic> item) {
+    final color = item['color'] as Color;
+    final generated = item['generated'] as double;
+    final disposed = item['disposed'] as double;
+    final disposedTo = item['disposedTo'] as String;
+    
     return Container(
-      padding: const EdgeInsets.all(8),
-      child: Text(
-        text,
-        style: TextStyle(
-          fontSize: 12,
-          fontWeight: isHeader ? FontWeight.bold : FontWeight.normal,
-          color: isHeader ? const Color(0xFF00796B) : Colors.black87,
-        ),
-        textAlign: TextAlign.center,
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: color.withOpacity(0.3)),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 8,
+            height: 40,
+            decoration: BoxDecoration(
+              color: color,
+              borderRadius: BorderRadius.circular(4),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            flex: 2,
+            child: Text(
+              item['name'] as String,
+              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              '${generated.toStringAsFixed(2)} kg',
+              style: const TextStyle(fontSize: 12),
+              textAlign: TextAlign.center,
+            ),
+          ),
+          Expanded(
+            flex: 2,
+            child: Text(
+              disposedTo.isEmpty ? 'Not specified' : disposedTo,
+              style: const TextStyle(fontSize: 12),
+              textAlign: TextAlign.center,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          Expanded(
+            child: Text(
+              '${disposed.toStringAsFixed(2)} kg',
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: color),
+              textAlign: TextAlign.center,
+            ),
+          ),
+        ],
       ),
     );
   }
   
   Widget _buildAnalyticsTab() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _buildStatsCards(),
-          const SizedBox(height: 16),
-          _buildWasteChart(),
-        ],
+    return Container(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [
+            const Color(0xFFF0F8FF),
+            Colors.white,
+          ],
+        ),
+      ),
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _buildStatsCards(),
+            const SizedBox(height: 24),
+            _buildWasteChart(),
+            const SizedBox(height: 24),
+            _buildTrendAnalysis(),
+          ],
+        ),
       ),
     );
   }
@@ -960,99 +1658,131 @@ class _MunicipalSolidWasteDetailsPageState extends State<MunicipalSolidWasteDeta
     double totalEmployeeWaste = 0;
     int totalEmployees = 0;
     if (_wasteRecords.isNotEmpty) {
-      totalEmployeeWaste = _wasteRecords.fold(0.0, (sum, r) => sum + (r.employeeGeneratedWaste));
-      totalEmployees = _wasteRecords.fold(0, (sum, r) => sum + (r.numEmployees));
+      totalEmployeeWaste = _wasteRecords.fold(0.0, (sum, r) => sum + r.employeeGeneratedWaste);
+      totalEmployees = _wasteRecords.fold(0, (sum, r) => sum + r.numEmployees);
     }
-    return Column(
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child: _buildStatCard(
-                'Total Records',
-                (_wasteStats['totalRecords'] ?? 0).toInt().toString(),
-                Icons.format_list_numbered,
-                Colors.blue,
-              ),
-            ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: _buildStatCard(
-                'Avg Houses',
-                (_wasteStats['avgHousesOccupied'] ?? 0).toStringAsFixed(0),
-                Icons.home,
-                Colors.green,
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 16),
-        Row(
-          children: [
-            Expanded(
-              child: _buildStatCard(
-                'Total Generated',
-                '${(_wasteStats['totalWasteGenerated'] ?? 0).toStringAsFixed(2)} kg',
-                Icons.trending_up,
-                Colors.orange,
-              ),
-            ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: _buildStatCard(
-                'Total Disposed',
-                '${(_wasteStats['totalWasteDisposed'] ?? 0).toStringAsFixed(2)} kg',
-                Icons.trending_down,
-                Colors.purple,
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 16),
-        Row(
-          children: [
-            Expanded(
-              child: _buildStatCard(
-                'Total Employees',
-                totalEmployees.toString(),
-                Icons.people,
-                Colors.teal,
-              ),
-            ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: _buildStatCard(
-                'Employee Waste',
-                '${totalEmployeeWaste.toStringAsFixed(2)} kg',
-                Icons.delete_sweep,
-                Colors.brown,
-              ),
-            ),
-          ],
-        ),
-      ],
+    
+    final stats = [
+      {
+        'title': 'Total Records',
+        'value': (_wasteStats['totalRecords'] ?? 0).toInt().toString(),
+        'icon': Icons.format_list_numbered_rounded,
+        'color': Colors.blue,
+        'gradient': [Colors.blue.shade400, Colors.blue.shade600],
+      },
+      {
+        'title': 'Avg Houses',
+        'value': (_wasteStats['avgHousesOccupied'] ?? 0).toStringAsFixed(0),
+        'icon': Icons.home_rounded,
+        'color': Colors.green,
+        'gradient': [Colors.green.shade400, Colors.green.shade600],
+      },
+      {
+        'title': 'Total Generated',
+        'value': '${(_wasteStats['totalWasteGenerated'] ?? 0).toStringAsFixed(1)} kg',
+        'icon': Icons.trending_up_rounded,
+        'color': Colors.orange,
+        'gradient': [Colors.orange.shade400, Colors.orange.shade600],
+      },
+      {
+        'title': 'Total Disposed',
+        'value': '${(_wasteStats['totalWasteDisposed'] ?? 0).toStringAsFixed(1)} kg',
+        'icon': Icons.trending_down_rounded,
+        'color': Colors.purple,
+        'gradient': [Colors.purple.shade400, Colors.purple.shade600],
+      },
+      {
+        'title': 'Total Employees',
+        'value': totalEmployees.toString(),
+        'icon': Icons.people_rounded,
+        'color': Colors.teal,
+        'gradient': [Colors.teal.shade400, Colors.teal.shade600],
+      },
+      {
+        'title': 'Employee Waste',
+        'value': '${totalEmployeeWaste.toStringAsFixed(1)} kg',
+        'icon': Icons.delete_sweep_rounded,
+        'color': Colors.brown,
+        'gradient': [Colors.brown.shade400, Colors.brown.shade600],
+      },
+    ];
+    
+    return GridView.builder(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 2,
+        crossAxisSpacing: 16,
+        mainAxisSpacing: 16,
+        childAspectRatio: 1.1,
+      ),
+      itemCount: stats.length,
+      itemBuilder: (context, index) {
+        final stat = stats[index];
+        return _buildEnhancedStatCard(stat);
+      },
     );
   }
   
-  Widget _buildStatCard(String title, String value, IconData icon, Color color) {
+  Widget _buildEnhancedStatCard(Map<String, dynamic> stat) {
+    final gradient = stat['gradient'] as List<Color>;
+    
     return Card(
-      elevation: 3,
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          children: [
-            Icon(icon, size: 32, color: color),
-            const SizedBox(height: 8),
-            Text(
-              title,
-              style: TextStyle(fontSize: 14, color: Colors.grey[700]),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              value,
-              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            ),
-          ],
+      elevation: 4,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Container(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(16),
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Colors.white, gradient[0].withOpacity(0.1)],
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(colors: gradient),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(
+                  stat['icon'] as IconData,
+                  size: 28,
+                  color: Colors.white,
+                ),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                stat['value'] as String,
+                style: const TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: Color(0xFF2D5A5A),
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 6),
+              Flexible(
+                child: Text(
+                  stat['title'] as String,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Colors.grey.shade600,
+                    fontWeight: FontWeight.w500,
+                  ),
+                  textAlign: TextAlign.center,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -1060,13 +1790,37 @@ class _MunicipalSolidWasteDetailsPageState extends State<MunicipalSolidWasteDeta
   
   Widget _buildWasteChart() {
     if (_wasteRecords.isEmpty) {
-      return const Card(
-        child: Padding(
-          padding: EdgeInsets.all(16),
-          child: Center(
-            child: Text(
-              'No data available for chart',
-              style: TextStyle(fontSize: 16, color: Colors.grey),
+      return Card(
+        elevation: 4,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        child: Container(
+          height: 250,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(16),
+            gradient: LinearGradient(
+              colors: [Colors.white, Colors.grey.shade50],
+            ),
+          ),
+          child: const Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.bar_chart_rounded, size: 64, color: Colors.grey),
+                SizedBox(height: 16),
+                Text(
+                  'No Data Available',
+                  style: TextStyle(
+                    fontSize: 18,
+                    color: Colors.grey,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                SizedBox(height: 8),
+                Text(
+                  'Add waste records to see analytics',
+                  style: TextStyle(color: Colors.grey),
+                ),
+              ],
             ),
           ),
         ),
@@ -1074,39 +1828,614 @@ class _MunicipalSolidWasteDetailsPageState extends State<MunicipalSolidWasteDeta
     }
     
     return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
+      elevation: 4,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Container(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(16),
+          gradient: LinearGradient(
+            colors: [Colors.white, Colors.blue.shade50],
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF2D5A5A).withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: const Icon(
+                      Icons.bar_chart_rounded,
+                      color: Color(0xFF2D5A5A),
+                      size: 24,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  const Text(
+                    'Waste Generation Trend',
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                      color: Color(0xFF2D5A5A),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 20),
+              SizedBox(
+                height: 200,
+                child: _buildLineChart(),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+  
+  Widget _buildLineChart() {
+    if (_wasteRecords.length < 2) {
+      return const Center(
+        child: Text(
+          'Need at least 2 records to show trend',
+          style: TextStyle(color: Colors.grey, fontSize: 16),
+        ),
+      );
+    }
+    
+    final sortedRecords = List<MunicipalWasteRecord>.from(_wasteRecords)
+      ..sort((a, b) => a.date.compareTo(b.date));
+    
+    final spots = sortedRecords.asMap().entries.map((entry) {
+      final index = entry.key;
+      final record = entry.value;
+      final totalWaste = record.dryGeneratedQuantity + 
+                        record.wetGeneratedQuantity + 
+                        record.sanitaryNapkinsGeneratedQuantity +
+                        record.eWasteGeneratedQuantity +
+                        record.bioMedicalWasteGeneratedQuantity +
+                        record.batteryWasteGeneratedQuantity +
+                        record.othersGeneratedQuantity;
+      return FlSpot(index.toDouble(), totalWaste);
+    }).toList();
+    
+    return LineChart(
+      LineChartData(
+        gridData: FlGridData(
+          show: true,
+          drawVerticalLine: false,
+          horizontalInterval: 50,
+          getDrawingHorizontalLine: (value) {
+            return FlLine(
+              color: Colors.grey.shade300,
+              strokeWidth: 1,
+            );
+          },
+        ),
+        titlesData: FlTitlesData(
+          leftTitles: AxisTitles(
+            sideTitles: SideTitles(
+              showTitles: true,
+              reservedSize: 50,
+              getTitlesWidget: (value, meta) {
+                return Text(
+                  '${value.toInt()}kg',
+                  style: const TextStyle(color: Colors.grey, fontSize: 12),
+                );
+              },
+            ),
+          ),
+          bottomTitles: AxisTitles(
+            sideTitles: SideTitles(
+              showTitles: true,
+              reservedSize: 40,
+              getTitlesWidget: (value, meta) {
+                final index = value.toInt();
+                if (index >= 0 && index < sortedRecords.length) {
+                  return Text(
+                    DateFormat('MM/dd').format(sortedRecords[index].date),
+                    style: const TextStyle(color: Colors.grey, fontSize: 12),
+                  );
+                }
+                return const Text('');
+              },
+            ),
+          ),
+          rightTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          topTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
+        ),
+        borderData: FlBorderData(show: false),
+        lineBarsData: [
+          LineChartBarData(
+            spots: spots,
+            isCurved: true,
+            gradient: LinearGradient(
+              colors: [const Color(0xFF2D5A5A), const Color(0xFF4A7C7D)],
+            ),
+            barWidth: 3,
+            isStrokeCapRound: true,
+            dotData: FlDotData(
+              show: true,
+              getDotPainter: (spot, percent, barData, index) {
+                return FlDotCirclePainter(
+                  radius: 4,
+                  color: Colors.white,
+                  strokeWidth: 2,
+                  strokeColor: const Color(0xFF2D5A5A),
+                );
+              },
+            ),
+            belowBarData: BarAreaData(
+              show: true,
+              gradient: LinearGradient(
+                colors: [
+                  const Color(0xFF2D5A5A).withOpacity(0.3),
+                  const Color(0xFF2D5A5A).withOpacity(0.0),
+                ],
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+  
+  Widget _buildTrendAnalysis() {
+    if (_wasteRecords.length < 2) return Container();
+    
+    final sortedRecords = List<MunicipalWasteRecord>.from(_wasteRecords)
+      ..sort((a, b) => a.date.compareTo(b.date));
+    
+    final firstRecord = sortedRecords.first;
+    final lastRecord = sortedRecords.last;
+    
+    final firstTotal = firstRecord.dryGeneratedQuantity + firstRecord.wetGeneratedQuantity + 
+                      firstRecord.sanitaryNapkinsGeneratedQuantity + firstRecord.eWasteGeneratedQuantity +
+                      firstRecord.bioMedicalWasteGeneratedQuantity + firstRecord.batteryWasteGeneratedQuantity +
+                      firstRecord.othersGeneratedQuantity;
+    
+    final lastTotal = lastRecord.dryGeneratedQuantity + lastRecord.wetGeneratedQuantity + 
+                     lastRecord.sanitaryNapkinsGeneratedQuantity + lastRecord.eWasteGeneratedQuantity +
+                     lastRecord.bioMedicalWasteGeneratedQuantity + lastRecord.batteryWasteGeneratedQuantity +
+                     lastRecord.othersGeneratedQuantity;
+    
+    final percentageChange = firstTotal > 0 ? ((lastTotal - firstTotal) / firstTotal * 100) : 0.0;
+    final isIncrease = percentageChange > 0;
+    
+    return Card(
+      elevation: 4,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Container(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(16),
+          gradient: LinearGradient(
+            colors: [Colors.white, (isIncrease ? Colors.red : Colors.green).shade50],
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: (isIncrease ? Colors.red : Colors.green).withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Icon(
+                      isIncrease ? Icons.trending_up_rounded : Icons.trending_down_rounded,
+                      color: isIncrease ? Colors.red : Colors.green,
+                      size: 24,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  const Text(
+                    'Trend Analysis',
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                      color: Color(0xFF2D5A5A),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Waste Generation Trend',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.grey.shade700,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            Icon(
+                              isIncrease ? Icons.arrow_upward : Icons.arrow_downward,
+                              color: isIncrease ? Colors.red : Colors.green,
+                              size: 20,
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              '${percentageChange.abs().toStringAsFixed(1)}%',
+                              style: TextStyle(
+                                fontSize: 24,
+                                fontWeight: FontWeight.bold,
+                                color: isIncrease ? Colors.red : Colors.green,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              isIncrease ? 'Increase' : 'Decrease',
+                              style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w600,
+                                color: isIncrease ? Colors.red : Colors.green,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'Compared to the first record (${DateFormat('MMM d').format(firstRecord.date)}) and latest record (${DateFormat('MMM d').format(lastRecord.date)})',
+                style: TextStyle(
+                  color: Colors.grey.shade600,
+                  fontSize: 14,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+  
+  Widget _buildDocumentsTab() {
+    return Container(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [
+            const Color(0xFFF0F8FF),
+            Colors.white,
+          ],
+        ),
+      ),
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(20),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              children: const [
-                Icon(Icons.bar_chart, color: Color(0xFF00796B)),
-                SizedBox(width: 8),
-                Text(
-                  'Recent Waste Generation Trend',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF00796B)),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            const SizedBox(
-              height: 200,
-              child: Center(
-                child: Text(
-                  'Chart implementation can be added here',
-                  style: TextStyle(color: Colors.grey),
-                ),
+            const Text(
+              'Document Management',
+              style: TextStyle(
+                fontSize: 24,
+                fontWeight: FontWeight.bold,
+                color: Color(0xFF2D5A5A),
               ),
             ),
+            const SizedBox(height: 8),
+            Text(
+              'Manage vendor licenses and disposal photos',
+              style: TextStyle(
+                color: Colors.grey.shade600,
+                fontSize: 16,
+              ),
+            ),
+            const SizedBox(height: 24),
+            _buildDocumentsSummary(),
+            const SizedBox(height: 24),
+            _buildRecentDocuments(),
           ],
         ),
       ),
     );
   }
+  
+  Widget _buildDocumentsSummary() {
+    return Row(
+      children: [
+        Expanded(
+          child: Card(
+            elevation: 4,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            child: Container(
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(16),
+                gradient: LinearGradient(
+                  colors: [Colors.blue.shade50, Colors.white],
+                ),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: [Colors.blue.shade400, Colors.blue.shade600],
+                        ),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: const Icon(
+                        Icons.assignment_outlined,
+                        color: Colors.white,
+                        size: 28,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    const Text(
+                      'Vendor Licenses',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.bold,
+                        color: Color(0xFF2D5A5A),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      '${_wasteRecords.length} Records',
+                      style: TextStyle(
+                        color: Colors.grey.shade600,
+                        fontSize: 14,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 16),
+        Expanded(
+          child: Card(
+            elevation: 4,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            child: Container(
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(16),
+                gradient: LinearGradient(
+                  colors: [Colors.green.shade50, Colors.white],
+                ),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: [Colors.green.shade400, Colors.green.shade600],
+                        ),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: const Icon(
+                        Icons.camera_alt_outlined,
+                        color: Colors.white,
+                        size: 32,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    const Text(
+                      'Disposal Photos',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: Color(0xFF2D5A5A),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      '${_wasteRecords.length} Records',
+                      style: TextStyle(
+                        color: Colors.grey.shade600,
+                        fontSize: 14,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+  
+  Widget _buildRecentDocuments() {
+    if (_wasteRecords.isEmpty) {
+      return Card(
+        elevation: 4,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        child: Container(
+          height: 200,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(16),
+            gradient: LinearGradient(
+              colors: [Colors.white, Colors.grey.shade50],
+            ),
+          ),
+          child: const Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.folder_open_outlined, size: 64, color: Colors.grey),
+                SizedBox(height: 16),
+                Text(
+                  'No Documents Found',
+                  style: TextStyle(
+                    fontSize: 18,
+                    color: Colors.grey,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                SizedBox(height: 8),
+                Text(
+                  'Upload documents when adding waste records',
+                  style: TextStyle(color: Colors.grey),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+    
+    return Card(
+      elevation: 4,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Container(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(16),
+          gradient: LinearGradient(
+            colors: [Colors.white, Colors.purple.shade50],
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Recent Documents',
+                style: TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                  color: Color(0xFF2D5A5A),
+                ),
+              ),
+              const SizedBox(height: 16),
+              ListView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                itemCount: _wasteRecords.take(5).length,
+                itemBuilder: (context, index) {
+                  final record = _wasteRecords[index];
+                  return _buildDocumentItem(record);
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+  
+  Widget _buildDocumentItem(MunicipalWasteRecord record) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.grey.shade200),
+      ),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: const Color(0xFF2D5A5A).withOpacity(0.1),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: const Icon(
+              Icons.description_outlined,
+              color: Color(0xFF2D5A5A),
+              size: 20,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Record ${record.id}',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w600,
+                    fontSize: 16,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  DateFormat('MMMM d, yyyy').format(record.date),
+                  style: TextStyle(
+                    color: Colors.grey.shade600,
+                    fontSize: 14,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.blue.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Text(
+                  'License',
+                  style: TextStyle(
+                    color: Colors.blue,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.green.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Text(
+                  'Photo',
+                  style: TextStyle(
+                    color: Colors.green,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
 }
 
-// Data Model (same as before but with enhanced error handling)
+// Data Model (enhanced with file upload support)
 class MunicipalWasteRecord {
   final int id;
   final DateTime date;
@@ -1136,6 +2465,8 @@ class MunicipalWasteRecord {
   final double othersQuantity;
   final DateTime createdAt;
   final DateTime updatedAt;
+  final String? vendorLicenseUrl;
+  final String? disposalPhotoUrl;
 
   MunicipalWasteRecord({
     required this.id,
@@ -1166,6 +2497,8 @@ class MunicipalWasteRecord {
     required this.othersQuantity,
     required this.createdAt,
     required this.updatedAt,
+    this.vendorLicenseUrl,
+    this.disposalPhotoUrl,
   });
 
   static double _safeParseDouble(dynamic value) {
@@ -1212,37 +2545,8 @@ class MunicipalWasteRecord {
       othersQuantity: _safeParseDouble(json['others_quantity']),
       createdAt: DateTime.parse(json['created_at'] ?? DateTime.now().toIso8601String()),
       updatedAt: DateTime.parse(json['updated_at'] ?? DateTime.now().toIso8601String()),
+      vendorLicenseUrl: json['vendor_license_url'],
+      disposalPhotoUrl: json['disposal_photo_url'],
     );
-  }
-
-  Map<String, dynamic> toJson() {
-    return {
-      'id': id,
-      'date': DateFormat('yyyy-MM-dd').format(date),
-      'no_of_houses_occupied': noOfHousesOccupied,
-      'num_employees': numEmployees,
-      'employee_generated_waste': employeeGeneratedWaste,
-      'dry_generated_quantity': dryGeneratedQuantity,
-      'dry_disposed_to': dryDisposedTo,
-      'dry_quantity': dryQuantity,
-      'wet_generated_quantity': wetGeneratedQuantity,
-      'wet_disposed_to': wetDisposedTo,
-      'wet_quantity': wetQuantity,
-      'sanitary_napkins_generated_quantity': sanitaryNapkinsGeneratedQuantity,
-      'sanitary_napkins_disposed_to': sanitaryNapkinsDisposedTo,
-      'sanitary_napkins_quantity': sanitaryNapkinsQuantity,
-      'e_waste_generated_quantity': eWasteGeneratedQuantity,
-      'e_waste_disposed_to': eWasteDisposedTo,
-      'e_waste_quantity': eWasteQuantity,
-      'bio_medical_waste_generated_quantity': bioMedicalWasteGeneratedQuantity,
-      'bio_medical_waste_disposed_to': bioMedicalWasteDisposedTo,
-      'bio_medical_waste_quantity': bioMedicalWasteQuantity,
-      'battery_waste_generated_quantity': batteryWasteGeneratedQuantity,
-      'battery_waste_disposed_to': batteryWasteDisposedTo,
-      'battery_waste_quantity': batteryWasteQuantity,
-      'others_generated_quantity': othersGeneratedQuantity,
-      'others_disposed_to': othersDisposedTo,
-      'others_quantity': othersQuantity,
-    };
   }
 }
