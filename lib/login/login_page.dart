@@ -512,6 +512,7 @@ class _EnhancedLoginPageState extends State<EnhancedLoginPage>
           decoration: BoxDecoration(
             color: Colors.white,
             borderRadius: BorderRadius.circular(20),
+            
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
