@@ -31,6 +31,7 @@ struct Object {
   LodRange lod[3];
   float lodEdge[3] = {0, 0, 0};  // typical triangle edge length (world units) per LOD
   bool transparent = false;      // alpha-blended material (no shadow casting)
+  bool occluder = false;         // used by the occlusion pre-pass (D3)
 };
 
 // Metallic-roughness PBR material. alpha < 1 = transparent (forward, blended).
@@ -53,7 +54,7 @@ struct DrawItem {
   LodRange r;
 };
 
-enum class SceneKind { Small, Large };
+enum class SceneKind { Small, Large, Huge };
 
 struct Scene {
   Mesh mesh;
@@ -69,6 +70,7 @@ float terrainHeight(float x, float z);
 
 // Small: session-1 scene (100,000 triangles, one LOD).
 // Large: ~1,000,000 triangles at full detail, 3 LODs per object.
+// Huge: ~5,000,000 triangles at full detail (Phase D), 3 LODs per object.
 Scene buildScene(ThreadPool& pool, SceneKind kind, int textureSize = 2048, int pointLights = 128);
 
 // Frustum test of every object, LOD selection by projected size, draw list out.

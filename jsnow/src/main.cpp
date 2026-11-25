@@ -116,7 +116,7 @@ void usage() {
       "  --no-taa        disable temporal anti-aliasing\n"
       "  --lights N      number of point lights (default 128, max 255)\n"
       "  --exposure E    tone-mapping exposure (default 1.6)\n"
-      "  --scene S       large (default: 1M tris, 3 LODs) or small (100k, session 1)\n"
+      "  --scene S       huge (default: 5M tris), large (1M tris) or small (100k, session 1)\n"
       "  --bench         run baseline, each trick, all tricks and fast; print a table\n"
       "  --bench-fast    benchmark baseline and --fast only\n"
       "  --quality       also measure PSNR against the full-quality renderer (untimed)\n"
@@ -134,7 +134,7 @@ int main(int argc, char** argv) {
   Options o;
   bool bench = false, benchFast = false, quality = false;
   int frames = 300, threads = int(std::thread::hardware_concurrency()), pngFrame = 150, texSize = 2048, lights = 128;
-  SceneKind kind = SceneKind::Large;
+  SceneKind kind = SceneKind::Huge;
   std::string png = "jsnow.png";
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -166,6 +166,7 @@ int main(int argc, char** argv) {
       std::string s = next();
       if (s == "small") kind = SceneKind::Small;
       else if (s == "large") kind = SceneKind::Large;
+      else if (s == "huge") kind = SceneKind::Huge;
       else { usage(); return 1; }
     } else if (a == "--size") {
       std::string s = next();

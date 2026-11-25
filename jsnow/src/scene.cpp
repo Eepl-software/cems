@@ -6,7 +6,7 @@
 
 namespace jsnow {
 
-static constexpr float kTerrainHalf = 80.0f;
+static constexpr float kSmallHalf = 80.0f;
 
 float terrainHeight(float x, float z) {
   float h = 4.0f * std::sin(x * 0.07f) * std::cos(z * 0.06f);
@@ -139,6 +139,37 @@ LodRange addSphere(Mesh& m, Vec3 center, float r, int S, int L, uint16_t mat) {
   return rb.done();
 }
 
+// Closed cylinder standing on `base`: segs x rings side quads + two caps.
+LodRange addCylinder(Mesh& m, Vec3 base, float r, float height, int segs, int rings, uint16_t mat) {
+  RangeBuilder rb(m);
+  const float kTwoPi = 6.28318531f;
+  const uint32_t first = uint32_t(m.px.size());
+  for (int i = 0; i <= rings; ++i)
+    for (int j = 0; j <= segs; ++j) {
+      const float a = kTwoPi * j / segs;
+      const Vec3 n{std::cos(a), 0, std::sin(a)};
+      addVertex(m, base + Vec3{n.x * r, height * i / rings, n.z * r}, n, 4.0f * j / segs, height * i / rings * 0.25f);
+    }
+  auto V = [&](int i, int j) { return first + uint32_t(i * (segs + 1) + j); };
+  for (int i = 0; i < rings; ++i)
+    for (int j = 0; j < segs; ++j) {
+      addTri(m, V(i, j), V(i + 1, j), V(i, j + 1), mat);
+      addTri(m, V(i, j + 1), V(i + 1, j), V(i + 1, j + 1), mat);
+    }
+  for (int cap = 0; cap < 2; ++cap) {  // bottom (cap 0) and top (cap 1)
+    const float y = cap ? height : 0.0f;
+    const Vec3 n{0, cap ? 1.0f : -1.0f, 0};
+    const uint32_t c = addVertex(m, base + Vec3{0, y, 0}, n, 0.5f, 0.5f);
+    const uint32_t ring = uint32_t(m.px.size());
+    for (int j = 0; j <= segs; ++j) {
+      const float a = kTwoPi * j / segs;
+      addVertex(m, base + Vec3{std::cos(a) * r, y, std::sin(a) * r}, n, 0.5f + 0.5f * std::cos(a), 0.5f + 0.5f * std::sin(a));
+    }
+    for (int j = 0; j < segs; ++j) addTri(m, c, ring + j, ring + j + 1, mat);
+  }
+  return rb.done();
+}
+
 // ---- procedural, tileable textures ----
 inline uint32_t hash3(int x, int y, int seed) {
   uint32_t h = uint32_t(x) * 374761393u + uint32_t(y) * 668265263u + uint32_t(seed) * 2246822519u;
@@ -218,7 +249,9 @@ Scene buildScene(ThreadPool& pool, SceneKind kind, int texSize, int pointLights)
   s.materials[1].texture = 1; s.materials[1].roughness = 0.7f;
   s.materials[2].texture = 2; s.materials[2].roughness = 0.35f;
 
-  const bool large = kind == SceneKind::Large;
+  const bool large = kind != SceneKind::Small;  // large and huge use chunks + 3 LODs
+  const bool huge = kind == SceneKind::Huge;
+  const float kTerrainHalf = huge ? 2 * kSmallHalf : kSmallHalf;
   // ---- terrain ----
   if (!large) {
     Object o;
@@ -227,7 +260,7 @@ Scene buildScene(ThreadPool& pool, SceneKind kind, int texSize, int pointLights)
     o.lod[0] = addTerrainPatch(m, -kTerrainHalf, -kTerrainHalf, 2 * kTerrainHalf, 2 * kTerrainHalf, 250, 160, false);
     s.objects.push_back(o);
   } else {
-    const int C = 16, Q = 40;  // 16x16 chunks of 40x40 quads
+    const int C = huge ? 32 : 16, Q = 40;  // CxC chunks of 40x40 quads, 10 m each
     const float cs = 2 * kTerrainHalf / C;
     for (int cz = 0; cz < C; ++cz)
       for (int cx = 0; cx < C; ++cx) {
@@ -243,6 +276,38 @@ Scene buildScene(ThreadPool& pool, SceneKind kind, int texSize, int pointLights)
         }
         s.objects.push_back(o);
       }
+  }
+
+  // ---- huge scene: towers (good occluders) ----
+  if (huge) {
+    std::mt19937 towerRng(31337);
+    std::uniform_real_distribution<float> T(0.0f, 1.0f);
+    const uint16_t firstTowerMat = uint16_t(s.materials.size());
+    for (int i = 0; i < 6; ++i) {
+      Material tm;
+      tm.texture = 1;
+      const float k = 0.7f + 0.1f * i;
+      tm.tint[0] = k; tm.tint[1] = k * (0.9f + 0.02f * i); tm.tint[2] = k * 0.85f;
+      tm.roughness = 0.55f + 0.05f * i;
+      s.materials.push_back(tm);
+    }
+    for (int i = 0; i < 480; ++i) {
+      const float x = (T(towerRng) * 2 - 1) * 150.0f, z = (T(towerRng) * 2 - 1) * 150.0f;
+      const float r = 1.5f + 2.5f * T(towerRng), height = 8.0f + 22.0f * T(towerRng);
+      const uint16_t mat = uint16_t(firstTowerMat + i % 6);
+      const Vec3 base{x, terrainHeight(x, z) - 2.0f, z};
+      Object o;
+      o.center = base + Vec3{0, height * 0.5f, 0};
+      o.radius = std::sqrt(r * r + height * height * 0.25f);
+      o.lodCount = 3;
+      const int segs[3] = {48, 24, 12}, rings[3] = {29, 14, 6};
+      for (int l = 0; l < 3; ++l) {
+        o.lod[l] = addCylinder(m, base, r, height, segs[l], rings[l], mat);
+        o.lodEdge[l] = std::min(6.283f * r / segs[l], height / rings[l]);
+      }
+      o.occluder = true;
+      s.objects.push_back(o);
+    }
   }
 
   // ---- spheres (same placement as session 1) ----
@@ -354,7 +419,8 @@ Scene buildScene(ThreadPool& pool, SceneKind kind, int texSize, int pointLights)
     s.lights.push_back(l);
   }
   for (const Object& o : s.objects) s.fullDetailTriangles += o.lod[0].indexCount / 3;
-  s.description = large ? "large (chunked terrain + spheres, 3 LODs)" : "small (session-1 scene)";
+  s.description = huge ? "huge (320 m terrain + 480 towers + spheres, 3 LODs)"
+                 : large ? "large (chunked terrain + spheres, 3 LODs)" : "small (session-1 scene)";
   return s;
 }
 

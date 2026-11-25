@@ -47,6 +47,8 @@ Tools installed in the session (needed again in a fresh container):
 | C4 bloom (shadow 2.2, post 0.87) | fast | 107 | 9.35 | 32.6 | 0.34 | 0.88 | 4.23 | 0.43 | – | 0.38 | raster+shade 4.2 |
 | C5 TAA (shadow 4.8, post 7.2) | baseline | 26.2 | 38.10 | ref | 0.73 | 2.07 | 23.29 | – | – | – | raster+shade 23.3, post 7.2 (TAA ≈ 3.5) |
 | C5 TAA (shadow 2.3, post 1.3) | fast | 102 | 9.79 | 31.2 | 0.33 | 0.87 | 4.21 | 0.41 | – | 0.37 | raster+shade 4.2 |
+| D1 5M tris (shadow 9.7, post 6.8) | baseline | 20.9 | 47.86 | ref | 1.47 | 3.32 | 26.60 | – | – | – | raster+shade 26.6, shadow 9.7 |
+| D1 5M tris (shadow 5.2, post 1.4) | fast | 63.7 | 15.69 | 29.0 | 0.77 | 1.67 | 5.76 | 0.44 | – | 0.48 | raster+shade 5.8, shadow 5.2 |
 
 ## Decisions log
 - A1: `--fast` = half resolution + reuse (best trade-off found in session 1).
@@ -128,6 +130,10 @@ Tools installed in the session (needed again in a fresh container):
 - **Phase C complete**: deferred shading (C1), PBR (C1), 128 point lights + tiled culling
   (C2), transparency (C3), bloom (C4), ACES tone mapping (C1), TAA (C5).
   Full-quality frame: 38 ms (26 FPS) at 1080p; `--fast`: 9.8 ms (102 FPS) at 31.2 dB.
+- D1: `--scene huge` (new default): 320x320 m terrain (32x32 chunks, 3 LODs + skirts),
+  480 cylinder towers (2880/720/168 tris, 1.5-4 m radius, 8-30 m tall, flagged as occluders),
+  50 spheres, 8 glass spheres, water. 5,123,136 triangles at full detail (6.86M across all
+  LODs, 3.7M vertices, built in 1.3 s). ~580k triangles submitted / ~286k binned per frame.
 
 ## Phase B optimisation rounds
 | round | change | baseline ms before → after | gain | fast ms before → after | gain |
