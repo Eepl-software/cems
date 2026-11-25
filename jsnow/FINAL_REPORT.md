@@ -144,7 +144,7 @@ and the driver upscales each frame bilinearly to the full size (cost included).
 
 | resolution | mode | FPS | ms/frame | bottleneck (driver stats) |
 |---|---|---:|---:|---|
-| 1280x720 | normal | **15.0** | 66.7 | raster+fragment ~40 ms, compute post-processing ~9 ms |
+| 1280x720 | normal | **15.0** | 66.7 | raster+fragment ~40 ms, compute post-processing ~9 ms (interpreter on the same driver: 4.2 FPS) |
 | 1280x720 | fast | **24.2** | 41.3 | raster+fragment 15.7, compute 10.4 |
 | 1920x1080 | normal | **8.1** | 123.3 | raster+fragment 88.5, compute 10.9 |
 | 1920x1080 | fast | **15.9** | 62.9 | raster+fragment 25.8, compute 10.7 |
@@ -158,7 +158,8 @@ compiler exposed (per-draw allocations, per-instance passes, scalar sampling and
 addressing). It also fixed a long-standing bug: D24 depth buffers cleared to 1.0 were
 stored as 0.
 
-Vulkan examples: see `docs_vk_examples_interp.md` (interpreter), `docs_vk_examples_jit.md`
+Vulkan examples: 31/31 run, geometric-mean speed-up 4.3x over the interpreter (pbrbasic
+0.62 → 6.8 FPS, radialblur 0.73 → 10.1, particlesystem 11 → 110). See `docs_vk_examples_interp.md` (interpreter), `docs_vk_examples_jit.md`
 (first JIT) and `docs_vk_examples_final.md` (end of Phase F); the table is in PROGRESS.md.
 
 **Next bottleneck:** fixed-function per-block work in the rasterizer (depth/stencil,

@@ -69,6 +69,8 @@ Tools installed in the session (needed again in a fresh container):
 | D4 `--stream --stream-budget 16` (thrashing) | baseline | 22.4 | 44.73 | 45.2 vs fully resident | 1.21 | 2.44 | 23.55 | – | – | – | 5.7% of LOD picks fall back |
 | DB1 static shadow caching (shadow 0.6, post 6.4) | baseline | 27.7 | 36.14 | ref | 1.30 | 2.75 | 23.88 | – | – | – | raster+shade 23.9 |
 | DB1 static shadow caching (shadow 0.5, post 1.3) | fast | 99.3 | 10.08 | 29.0 | 0.63 | 1.27 | 4.94 | 0.42 | – | 0.39 | raster+shade 4.9 |
+| F (session 3, renderer unchanged; regression check) | baseline | 31.1 | 32.12 | ref | 1.15 | 2.53 | 21.96 | – | – | – | raster+shade 22.0, post 4.8 |
+| F (session 3, regression check) | fast | 106.7 | 9.37 | 29.0 | 0.63 | 1.24 | 4.56 | 0.39 | – | 0.38 | raster+shade 4.6 |
 
 ## Decisions log
 - A1: `--fast` = half resolution + reuse (best trade-off found in session 1).
@@ -349,7 +351,7 @@ upscale); stage times are the driver's own (`JSNOW_ICD_STATS`, steady state, las
 | 1920x1080 | normal | **8.1** | 123.3 | 88.5 | 10.9 | 2.2 | 1.4 | 724k |
 | 1920x1080 | fast (960x540 + upscale) | **15.9** | 62.9 | 25.8 | 10.7 | 2.3 | 1.6 | 198k |
 
-1280x720 normal over the phase: F1 interpreter VKQ_INTERP → F2b JIT 10.3 → F2c 13.4 → F2d **15.0**
+1280x720 normal over the phase: interpreter (final driver, `JSNOW_JIT=0`) 4.2 → F2b JIT 10.3 → F2c 13.4 → F2d **15.0**
 (cold shader cache costs ~0.3 FPS on the first run: each new shader takes ~0.3-1 s to compile).
 Screenshot: `docs_vkquake_jit.png` (frame 300 of demo1, 1280x720, JIT).
 
