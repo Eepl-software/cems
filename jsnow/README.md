@@ -1,5 +1,10 @@
 # JSNOW — CPU-only 3D renderer
 
+> Session 2 (Phases A-E: textures, shadows, 1M/5M triangles, NEON, deferred PBR, 128 lights,
+> transparency, bloom, TAA, meshlets, HiZ, LOD streaming, and a Vulkan ICD running vkcube and
+> 30/31 Vulkan examples) is documented in `PROGRESS.md` and summarised in `FINAL_REPORT.md`.
+> Default scene is now `--scene huge`; the numbers below are session 1's.
+
 An experiment in how fast pure-CPU rasterization can go. C++20, CMake, no GPU,
 no window: frames are rendered into memory and one frame is saved as a PNG.
 

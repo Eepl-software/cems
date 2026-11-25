@@ -306,6 +306,11 @@ gltfloading 4.0→9.1 FPS, pushconstants 8.6→23.2, pbrbasic 0.25→0.54, multi
 
 
 
+## Final state (end of session 2)
+Final 6-config bench (5M scene, all features): baseline 27.1 FPS / 36.86 ms, fast 105.4 FPS /
+9.49 ms (29.0 dB), half 53.6, checker 59.1 (21.9 dB), reuse 40.6, all 69.9.
+See `FINAL_REPORT.md` for the step table, budget analysis and AAA-game assessment.
+
 ## Done
 - Session 1: tiled AVX2 rasterizer, half/checker/reuse tricks, benchmark harness.
 - A1: `--fast`.
