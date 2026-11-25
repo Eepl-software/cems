@@ -96,7 +96,9 @@ void ShadowMaps::update(const Camera& cam, Vec3 L, StageTimes& st) {
     pp.viewProj = vp;
     pp.vp = Viewport::full(S_, S_);
     pp.mode = PassMode::DepthOnly;
-    Target t{S_, S_, nullptr, maps_.data() + size_t(c) * S_ * S_};
+    Target t;
+    t.w = S_; t.h = S_;
+    t.depth = maps_.data() + size_t(c) * S_ * S_;
     rast_.render(pp, draws_, t, inner);
     nearD = farD * 0.9f;  // overlap a little
   }

@@ -15,6 +15,8 @@ struct Options {
   bool checker = false;  // 1/4 of the pixels per frame, rotating 2x2 pattern
   bool reuse = false;    // reproject earlier frames with motion vectors
   bool shadows = true;   // sun cascaded shadow maps
+  bool pointLights = true;
+  float exposure = 1.0f;
   int outW = 1920, outH = 1080;
   std::string name() const;
 };
@@ -40,7 +42,9 @@ class Engine {
   size_t submitted() const { return submitted_; }
 
  private:
-  void renderScene(const Camera& cam, const Viewport& vp, const Target& t, StageTimes& st);
+  // Renders HDR into hdr (w x h) + depth, then tone maps into ldr.
+  void renderScene(const Camera& cam, const Viewport& vp, int w, int h, std::vector<float>* hdr, float* depth,
+                   uint32_t* ldr, StageTimes& st);
 
   ThreadPool& pool_;
   const Scene& scene_;
@@ -51,6 +55,7 @@ class Engine {
   int W_, H_;
   std::vector<uint32_t> color_[2];
   std::vector<float> depth_[2];
+  std::vector<float> hdr_[3], subHdr_[3];  // linear HDR of the full / quarter target
   std::vector<uint32_t> subColor_;
   std::vector<float> subDepth_;
   std::vector<uint32_t> out_;

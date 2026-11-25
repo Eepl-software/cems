@@ -52,27 +52,39 @@ Engine::Engine(ThreadPool& pool, const Scene& scene, Options o)
   W_ = o.half ? o.outW / 2 : o.outW;
   H_ = o.half ? o.outH / 2 : o.outH;
   const size_t n = size_t(W_) * H_;
-  for (int i = 0; i < 2; ++i) { color_[i].assign(n, kSkyColor); depth_[i].assign(n, 0.0f); }
-  if (o.checker) { subColor_.resize(n / 4); subDepth_.resize(n / 4); }
+  for (int i = 0; i < 2; ++i) { color_[i].assign(n, 0xFF000000u); depth_[i].assign(n, 0.0f); }
+  for (auto& p : hdr_) p.resize(n);
+  if (o.checker) {
+    subColor_.resize(n / 4); subDepth_.resize(n / 4);
+    for (auto& p : subHdr_) p.resize(n / 4);
+  }
   if (o.half) out_.resize(size_t(o.outW) * o.outH);
   if (o.shadows) shadows_ = std::make_unique<ShadowMaps>(pool, scene);
 }
 
 Engine::~Engine() = default;
 
-void Engine::renderScene(const Camera& cam, const Viewport& vp, const Target& t, StageTimes& st) {
+void Engine::renderScene(const Camera& cam, const Viewport& vp, int w, int h, std::vector<float>* hdr, float* depth,
+                         uint32_t* ldr, StageTimes& st) {
   auto a = clk::now();
   submitted_ = buildDrawList(scene_, cam.viewProj, cam.pos, lodPixelScale(cam), true, 0, draws_).triangles;
   st.cull += ms(a, clk::now());
   if (shadows_) shadows_->update(cam, sunDirection(), st);
   PassParams pp;
   pp.viewProj = cam.viewProj;
+  pp.view = cam.view;
   pp.vp = vp;
   pp.mode = PassMode::Shaded;
   pp.camPos = cam.pos;
   pp.sunDir = sunDirection();
   pp.shadow = shadows_.get();
+  pp.pointLights = o_.pointLights;
+  Target t{w, h, {hdr[0].data(), hdr[1].data(), hdr[2].data()}, depth};
   rast_.render(pp, draws_, t, st);
+  a = clk::now();
+  const float* planes[3] = {hdr[0].data(), hdr[1].data(), hdr[2].data()};
+  tonemap(pool_, w, h, planes, o_.exposure, ldr);
+  st.post += ms(a, clk::now());
 }
 
 const uint32_t* Engine::renderFrame(int f, StageTimes& st) {
@@ -81,8 +93,7 @@ const uint32_t* Engine::renderFrame(int f, StageTimes& st) {
   const int cur = (o_.reuse && f > 0) ? (hist_ ^ 1) : hist_;
   const bool needDepth = o_.reuse;
   auto renderFull = [&](int i) {
-    Target t{W_, H_, color_[i].data(), needDepth ? depth_[i].data() : nullptr};
-    renderScene(cam, Viewport::full(W_, H_), t, st);
+    renderScene(cam, Viewport::full(W_, H_), W_, H_, hdr_, needDepth ? depth_[i].data() : nullptr, color_[i].data(), st);
   };
   auto reproject = [&](int from, int to) {
     auto a = clk::now();
@@ -93,8 +104,8 @@ const uint32_t* Engine::renderFrame(int f, StageTimes& st) {
   auto renderQuarter = [&](int into) {
     static const int kPattern[4][2] = {{0, 0}, {1, 1}, {1, 0}, {0, 1}};
     const int ox = kPattern[f & 3][0], oy = kPattern[f & 3][1];
-    Target t{W_ / 2, H_ / 2, subColor_.data(), needDepth ? subDepth_.data() : nullptr};
-    renderScene(cam, Viewport::interleaved(W_, H_, ox, oy), t, st);
+    renderScene(cam, Viewport::interleaved(W_, H_, ox, oy), W_ / 2, H_ / 2, subHdr_,
+                needDepth ? subDepth_.data() : nullptr, subColor_.data(), st);
     auto a = clk::now();
     if (o_.reuse)  // fresh samples + valid history; invalid history -> nearest fresh sample
       composeInterleaved(pool_, W_, H_, ox, oy, subColor_.data(), subDepth_.data(), reproj_.valid(),

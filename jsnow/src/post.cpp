@@ -197,6 +197,37 @@ void composeInterleaved(ThreadPool& pool, int w, int h, int ox, int oy, const ui
   });
 }
 
+void tonemap(ThreadPool& pool, int w, int h, const float* const hdr[3], float exposure, uint32_t* out) {
+  using namespace simd;
+  const size_t n = size_t(w) * h;
+  const int blocksN = int((n + 16383) / 16384);
+  pool.run(blocksN, [&](int b, int) {
+    const size_t i0 = size_t(b) * 16384, i1 = std::min(n, i0 + 16384);
+    size_t i = i0;
+    auto aces = [](vf x) {
+      const vf num = x * fma(x, set1(2.51f), set1(0.03f));
+      const vf den = fma(x, fma(x, set1(2.43f), set1(0.59f)), set1(0.14f));
+      return clamp(num / den, zerof(), set1(1.0f));
+    };
+    const vf e = set1(exposure), k = set1(255.0f), half = set1(0.5f);
+    for (; i + 8 <= i1; i += 8) {
+      const vi r = trunc_i(fma(sqrt(aces(loadu(hdr[0] + i) * e)), k, half));
+      const vi g = trunc_i(fma(sqrt(aces(loadu(hdr[1] + i) * e)), k, half));
+      const vi bb = trunc_i(fma(sqrt(aces(loadu(hdr[2] + i) * e)), k, half));
+      storeui(out + i, r | shl<8>(g) | shl<16>(bb) | set1i(int32_t(0xFF000000u)));
+    }
+    for (; i < i1; ++i) {
+      uint32_t px = 0xFF000000u;
+      for (int c = 0; c < 3; ++c) {
+        const float x = hdr[c][i] * exposure;
+        const float y = std::clamp(x * (2.51f * x + 0.03f) / (x * (2.43f * x + 0.59f) + 0.14f), 0.0f, 1.0f);
+        px |= uint32_t(std::sqrt(y) * 255.0f + 0.5f) << (8 * c);
+      }
+      out[i] = px;
+    }
+  });
+}
+
 void scatterInterleaved(ThreadPool& pool, int w, int h, int ox, int oy, const uint32_t* subColor,
                         const float* subDepth, uint32_t* color, float* depth) {
   const int sw = w / 2, sh = h / 2;

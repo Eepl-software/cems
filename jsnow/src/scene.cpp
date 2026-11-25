@@ -214,9 +214,9 @@ Scene buildScene(ThreadPool& pool, SceneKind kind, int texSize) {
   }));
   s.textures = makeTextureArray(tex);
   s.materials.resize(3);
-  s.materials[0].texture = 0; s.materials[0].specular = 0.08f;
-  s.materials[1].texture = 1; s.materials[1].specular = 0.15f;
-  s.materials[2].texture = 2; s.materials[2].specular = 0.45f;
+  s.materials[0].texture = 0; s.materials[0].roughness = 0.85f;
+  s.materials[1].texture = 1; s.materials[1].roughness = 0.7f;
+  s.materials[2].texture = 2; s.materials[2].roughness = 0.35f;
 
   const bool large = kind == SceneKind::Large;
   // ---- terrain ----
@@ -246,7 +246,7 @@ Scene buildScene(ThreadPool& pool, SceneKind kind, int texSize) {
   }
 
   // ---- spheres (same placement as session 1) ----
-  std::mt19937 rng(1234);
+  std::mt19937 rng(1234), matRng(777);  // separate streams keep session-1 placement
   std::uniform_real_distribution<float> U(0.0f, 1.0f);
   for (int i = 0; i < 50; ++i) {
     const float r = 1.5f + 3.0f * U(rng);
@@ -258,7 +258,8 @@ Scene buildScene(ThreadPool& pool, SceneKind kind, int texSize) {
     mat.tint[0] = 0.5f + 0.45f * std::cos(6.283f * hue);
     mat.tint[1] = 0.5f + 0.45f * std::cos(6.283f * (hue + 0.33f));
     mat.tint[2] = 0.5f + 0.45f * std::cos(6.283f * (hue + 0.67f));
-    mat.specular = 0.5f;
+    mat.roughness = 0.15f + 0.7f * U(matRng);
+    mat.metallic = U(matRng) < 0.3f ? 1.0f : 0.0f;
     const uint16_t id = uint16_t(s.materials.size());
     s.materials.push_back(mat);
     Object o;

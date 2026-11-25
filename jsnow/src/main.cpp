@@ -69,7 +69,8 @@ Result runConfig(ThreadPool& pool, const Scene& scene, const Options& o, int fra
   if (quality) {
     // Untimed second pass: compare every 5th frame to the full-quality renderer.
     Options ref;
-    ref.outW = o.outW; ref.outH = o.outH; ref.shadows = o.shadows;
+    ref.outW = o.outW; ref.outH = o.outH; ref.shadows = o.shadows; ref.pointLights = o.pointLights;
+    ref.exposure = o.exposure;
     Engine test(pool, scene, o), reference(pool, scene, ref);
     StageTimes dummy;
     double sum = 0;
@@ -93,10 +94,11 @@ void printResult(const Result& r) {
   std::printf("%-20s %7.1f FPS %7.2f ms/frame (p99 %6.2f)", r.name.c_str(), r.fps, r.avgMs, r.p99Ms);
   if (r.psnrDb > 0) std::printf("  PSNR %5.1f dB", r.psnrDb);
   std::printf("  [%.0f tris submitted, %.0f binned]\n", r.submitted, r.binned);
-  std::printf("    ms/frame: cull %.2f | shadow %.2f | vertex %.2f | setup+bin %.2f | raster %.2f | "
-              "reproject %.2f | compose %.2f | upscale %.2f\n",
+  std::printf("    ms/frame: cull %.2f | shadow %.2f | vertex %.2f | setup+bin %.2f | raster+shade %.2f | "
+              "post %.2f | reproject %.2f | compose %.2f | upscale %.2f\n",
               r.stages.cull / n, r.stages.shadow / n, r.stages.vertex / n, r.stages.setup / n,
-              r.stages.raster / n, r.stages.reproject / n, r.stages.compose / n, r.stages.upscale / n);
+              r.stages.raster / n, r.stages.post / n, r.stages.reproject / n, r.stages.compose / n,
+              r.stages.upscale / n);
 }
 
 void usage() {
@@ -108,6 +110,8 @@ void usage() {
       "  --all           all three tricks\n"
       "  --fast          half resolution + reuse (best speed/quality trade-off)\n"
       "  --no-shadows    disable the sun's cascaded shadow maps\n"
+      "  --no-lights     disable the point lights\n"
+      "  --exposure E    tone-mapping exposure (default 1)\n"
       "  --scene S       large (default: 1M tris, 3 LODs) or small (100k, session 1)\n"
       "  --bench         run baseline, each trick, all tricks and fast; print a table\n"
       "  --bench-fast    benchmark baseline and --fast only\n"
@@ -140,6 +144,8 @@ int main(int argc, char** argv) {
     else if (a == "--all") o.half = o.checker = o.reuse = true;
     else if (a == "--fast") o.half = o.reuse = true;
     else if (a == "--no-shadows") o.shadows = false;
+    else if (a == "--no-lights") o.pointLights = false;
+    else if (a == "--exposure") o.exposure = float(std::atof(next().c_str()));
     else if (a == "--bench") bench = true;
     else if (a == "--bench-fast") bench = benchFast = true;
     else if (a == "--quality") quality = true;

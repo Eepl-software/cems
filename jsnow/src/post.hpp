@@ -36,6 +36,9 @@ void composeInterleaved(ThreadPool& pool, int w, int h, int ox, int oy, const ui
 void scatterInterleaved(ThreadPool& pool, int w, int h, int ox, int oy, const uint32_t* subColor,
                         const float* subDepth, uint32_t* color, float* depth);
 
+// HDR -> display: exposure, ACES filmic curve (Narkowicz fit), gamma 2 encode.
+void tonemap(ThreadPool& pool, int w, int h, const float* const hdr[3], float exposure, uint32_t* out);
+
 // Trick 1: 2x bilinear upscale, w x h -> 2w x 2h.
 void upscale2x(ThreadPool& pool, int w, int h, const uint32_t* src, uint32_t* dst);
 

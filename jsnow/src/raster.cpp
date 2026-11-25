@@ -27,7 +27,9 @@ struct ShadeCtx {
   const ShadowLookup* shadow;
   const TextureArray* tex;
   const int32_t* matLayer;
-  const float *matR, *matG, *matB, *matSpec;
+  const float *matR, *matG, *matB, *matRough, *matMetal;
+  // point lights
+  const float *lx, *ly, *lz, *lr, *lcr, *lcg, *lcb;
 };
 
 }  // namespace
@@ -249,16 +251,28 @@ namespace {
 
 inline vf plane8(const float* p, vf x, vf y) { return fma(set1(p[1]), x, fma(set1(p[2]), y, set1(p[0]))); }
 
-// Deferred shading of 8 pixels of a tile from its visibility buffer: the
-// attributes of every distinct triangle in the group are evaluated once for
-// all lanes and merged per lane; texture, shadow and lighting then run once
-// per pixel with full lane utilisation.
+// G-buffer of 8 pixels, resolved from the visibility buffer. In this
+// tile-based deferred design it never leaves registers/L1: the lighting pass
+// consumes it straight after the resolve (the CPU analogue of on-chip tile
+// memory on mobile GPUs).
+struct GBuf {
+  vf ar, ag, ab;     // linear albedo
+  vf nx, ny, nz;     // unit normal
+  vf wx, wy, wz, w;  // world position, view depth
+  vf rough, metal;
+  vm sky;
+};
+
+// Resolve: the attributes of every distinct triangle in the group are
+// evaluated once for all lanes and merged per lane; then one texture fetch per
+// pixel with a per-lane material.
 template <class AttrOf>
-inline vi shadeGroup(vi ids, vf x, vf y, const ShadeCtx& s, const AttrOf& attrOf) {
+inline GBuf resolveGroup(vi ids, vf x, vf y, const ShadeCtx& s, const AttrOf& attrOf) {
   alignas(32) int32_t idl[8];
   lanes(ids, idl);
-  const vm sky = cmpeq(ids, set1i(-1));
-  int remaining = ~bits(sky) & 0xFF;
+  GBuf g;
+  g.sky = cmpeq(ids, set1i(-1));
+  int remaining = ~bits(g.sky) & 0xFF;
   vf W = set1(1.0f), U = zerof(), V = zerof(), LOD = zerof();
   vf NX = zerof(), NY = set1(1.0f), NZ = zerof(), WX = zerof(), WY = zerof(), WZ = zerof();
   vi MAT = set1i(0);
@@ -287,34 +301,107 @@ inline vi shadeGroup(vi ids, vf x, vf y, const ShadeCtx& s, const AttrOf& attrOf
     WZ = select(m, plane8(t.pa[7], fx, fy) * w, WZ);
     MAT = selecti(m, set1i(int32_t(t.material)), MAT);
   }
-  vf r, g, b;
-  sampleBilinear(*s.tex, gather(s.matLayer, MAT), U, V, LOD, r, g, b);
+  vf r, gg, b;
+  sampleBilinear(*s.tex, gather(s.matLayer, MAT), U, V, LOD, r, gg, b);
+  // Textures are sRGB-ish: approximate decode with gamma 2 (x^2).
+  const vf k = set1(1.0f / 255.0f);
+  r = r * k; gg = gg * k; b = b * k;
+  g.ar = r * r * gatherf(s.matR, MAT);
+  g.ag = gg * gg * gatherf(s.matG, MAT);
+  g.ab = b * b * gatherf(s.matB, MAT);
   const vf rn = rsqrt_fast(fma(NX, NX, fma(NY, NY, NZ * NZ)));
-  const vf nx = NX * rn, ny = NY * rn, nz = NZ * rn;
-  const vf Lx = set1(s.L[0]), Ly = set1(s.L[1]), Lz = set1(s.L[2]);
-  const vf ndl = max(fma(nx, Lx, fma(ny, Ly, nz * Lz)), zerof());
-  vf lit = set1(1.0f);
-  // Shadow lookups only matter where the sun can reach the surface.
-  if (s.shadow && bits(andnot(sky, ndl > zerof()))) lit = s.shadow->sample(WX, WY, WZ, W, ndl);
-  const vf vx = set1(s.cam[0]) - WX, vy = set1(s.cam[1]) - WY, vz = set1(s.cam[2]) - WZ;
-  const vf rv = rsqrt_fast(fma(vx, vx, fma(vy, vy, vz * vz)));
-  const vf hx = fma(vx, rv, Lx), hy = fma(vy, rv, Ly), hz = fma(vz, rv, Lz);
-  const vf rh = rsqrt_fast(fma(hx, hx, fma(hy, hy, hz * hz)));
-  vf ndh = max(fma(nx, hx, fma(ny, hy, nz * hz)) * rh, zerof());
-  ndh = ndh * ndh; ndh = ndh * ndh; ndh = ndh * ndh; ndh = ndh * ndh; ndh = ndh * ndh;  // ^32
-  const vf sp = maskf(ndl > zerof(), ndh * lit * gatherf(s.matSpec, MAT) * set1(255.0f));
-  const vf direct = ndl * lit;
-  const vf amb = fma(ny, set1(0.08f), set1(0.16f));
-  const vf tr = gatherf(s.matR, MAT), tg = gatherf(s.matG, MAT), tb = gatherf(s.matB, MAT);
-  const vf k255 = set1(255.0f);
-  const vi ri = trunc_i(min(fma(r * tr, fma(direct, set1(1.00f), amb), sp), k255));
-  const vi gi = trunc_i(min(fma(g * tg, fma(direct, set1(0.94f), amb), sp), k255));
-  const vi bi = trunc_i(min(fma(b * tb, fma(direct, set1(0.82f), amb), sp), k255));
-  const vi col = ri | shl<8>(gi) | shl<16>(bi) | set1i(int32_t(0xFF000000u));
-  return selecti(sky, set1i(int32_t(kSkyColor)), col);
+  g.nx = NX * rn; g.ny = NY * rn; g.nz = NZ * rn;
+  g.wx = WX; g.wy = WY; g.wz = WZ; g.w = W;
+  g.rough = gatherf(s.matRough, MAT);
+  g.metal = gatherf(s.matMetal, MAT);
+  return g;
 }
 
-// Rasterizes one triangle into a 64x64 tile, 8 pixels per step.
+// Cook-Torrance GGX specular + Lambert diffuse for one light direction.
+// Returns (diffuse+specular) * radiance * n.l per channel, accumulated into o*.
+struct PBRPixel {
+  vf nx, ny, nz, vx, vy, vz, nv;
+  vf dr, dg, db;     // diffuse colour / pi
+  vf f0r, f0g, f0b;  // specular reflectance at normal incidence
+  vf a2, k;          // GGX alpha^2, Smith k
+};
+
+inline void addLight(const PBRPixel& p, vf lx, vf ly, vf lz, vf cr, vf cg, vf cb, vf& orr, vf& og, vf& ob) {
+  const vf one = set1(1.0f);
+  const vf nl = max(fma(p.nx, lx, fma(p.ny, ly, p.nz * lz)), zerof());
+  vf hx = lx + p.vx, hy = ly + p.vy, hz = lz + p.vz;
+  const vf rh = rsqrt_fast(max(fma(hx, hx, fma(hy, hy, hz * hz)), set1(1e-8f)));
+  hx = hx * rh; hy = hy * rh; hz = hz * rh;
+  const vf nh = max(fma(p.nx, hx, fma(p.ny, hy, p.nz * hz)), zerof());
+  const vf vh = max(fma(p.vx, hx, fma(p.vy, hy, p.vz * hz)), zerof());
+  const vf dd = fma(nh * nh, p.a2 - one, one);
+  const vf D = p.a2 * rcp_fast(set1(3.14159265f) * dd * dd);
+  const vf omk = one - p.k;
+  const vf Vis = rcp_fast(set1(4.0f) * fma(nl, omk, p.k) * fma(p.nv, omk, p.k));
+  const vf fc = one - vh, fc2 = fc * fc, f5 = fc2 * fc2 * fc;  // Schlick
+  const vf spec = D * Vis;
+  const vf Fr = fma(one - p.f0r, f5, p.f0r), Fg = fma(one - p.f0g, f5, p.f0g), Fb = fma(one - p.f0b, f5, p.f0b);
+  orr = fma(fma(Fr, spec, p.dr * (one - Fr)) * cr, nl, orr);
+  og = fma(fma(Fg, spec, p.dg * (one - Fg)) * cg, nl, og);
+  ob = fma(fma(Fb, spec, p.db * (one - Fb)) * cb, nl, ob);
+}
+
+// Lighting pass for 8 pixels: sun (shadowed) + hemisphere ambient + the
+// point lights of this 16x16 sub-tile. Writes linear HDR radiance.
+inline void lightGroup(const GBuf& g, const ShadeCtx& s, const uint8_t* lightList, int lightCount, vf& orr,
+                       vf& og, vf& ob) {
+  const vf one = set1(1.0f);
+  PBRPixel p;
+  p.nx = g.nx; p.ny = g.ny; p.nz = g.nz;
+  vf vx = set1(s.cam[0]) - g.wx, vy = set1(s.cam[1]) - g.wy, vz = set1(s.cam[2]) - g.wz;
+  const vf rv = rsqrt_fast(fma(vx, vx, fma(vy, vy, vz * vz)));
+  p.vx = vx * rv; p.vy = vy * rv; p.vz = vz * rv;
+  p.nv = max(fma(p.nx, p.vx, fma(p.ny, p.vy, p.nz * p.vz)), set1(1e-3f));
+  const vf invPi = set1(0.31830989f), dielectric = set1(0.04f);
+  const vf diff = (one - g.metal) * invPi;
+  p.dr = g.ar * diff; p.dg = g.ag * diff; p.db = g.ab * diff;
+  p.f0r = fma(g.metal, g.ar - dielectric, dielectric);
+  p.f0g = fma(g.metal, g.ag - dielectric, dielectric);
+  p.f0b = fma(g.metal, g.ab - dielectric, dielectric);
+  const vf a = max(g.rough * g.rough, set1(0.02f));
+  p.a2 = a * a;
+  const vf r1 = g.rough + one;
+  p.k = r1 * r1 * set1(0.125f);
+  // Ambient: hemisphere sky irradiance on the diffuse part + a little sky specular.
+  const vf hemi = fma(g.ny, set1(0.5f), set1(0.5f));
+  const vf ad = hemi * (one - g.metal), as = hemi * set1(0.5f);
+  orr = fma(g.ar * ad, set1(kSkyColor[0]), p.f0r * as * set1(kSkyColor[0]));
+  og = fma(g.ag * ad, set1(kSkyColor[1]), p.f0g * as * set1(kSkyColor[1]));
+  ob = fma(g.ab * ad, set1(kSkyColor[2]), p.f0b * as * set1(kSkyColor[2]));
+  // Sun.
+  const vf Lx = set1(s.L[0]), Ly = set1(s.L[1]), Lz = set1(s.L[2]);
+  const vf ndl = fma(g.nx, Lx, fma(g.ny, Ly, g.nz * Lz));
+  const vm litMask = andnot(g.sky, ndl > zerof());
+  if (bits(litMask)) {
+    vf lit = one;
+    if (s.shadow) lit = s.shadow->sample(g.wx, g.wy, g.wz, g.w, max(ndl, zerof()));
+    addLight(p, Lx, Ly, Lz, set1(kSunColor[0]) * lit, set1(kSunColor[1]) * lit, set1(kSunColor[2]) * lit, orr, og, ob);
+  }
+  // Point lights (inverse square with a smooth window to zero at the radius).
+  for (int i = 0; i < lightCount; ++i) {
+    const int li = lightList[i];
+    vf dx = set1(s.lx[li]) - g.wx, dy = set1(s.ly[li]) - g.wy, dz = set1(s.lz[li]) - g.wz;
+    const vf d2 = fma(dx, dx, fma(dy, dy, dz * dz));
+    const float r = s.lr[li];
+    const vf x = d2 * set1(1.0f / (r * r));
+    const vm in = andnot(g.sky, x < one);
+    if (!bits(in)) continue;
+    const vf win = max(one - x * x, zerof());
+    const vf att = maskf(in, win * win * rcp_fast(d2 + set1(1.0f)));
+    const vf il = rsqrt_fast(max(d2, set1(1e-6f)));
+    dx = dx * il; dy = dy * il; dz = dz * il;
+    addLight(p, dx, dy, dz, set1(s.lcr[li]) * att, set1(s.lcg[li]) * att, set1(s.lcb[li]) * att, orr, og, ob);
+  }
+  orr = select(g.sky, set1(kSkyColor[0]), orr);
+  og = select(g.sky, set1(kSkyColor[1]), og);
+  ob = select(g.sky, set1(kSkyColor[2]), ob);
+}
+
 // Shaded passes only record the winning triangle id (visibility buffer).
 template <bool kShaded>
 void drawTri(const TriHeader& t, uint32_t triId, float* depth, uint32_t* ids, int tileX, int tileY) {
@@ -388,7 +475,9 @@ void Rasterizer::rasterTile(int tile, int tid, const Target& tg, const PassParam
   const int w = std::min(kTile, tg.w - tileX), h = std::min(kTile, tg.h - tileY);
   if (shaded) {
     const ShadeCtx s{{pp.sunDir.x, pp.sunDir.y, pp.sunDir.z}, {pp.camPos.x, pp.camPos.y, pp.camPos.z}, pp.shadow,
-                     &scene_.textures, matLayer_.data(), matR_.data(), matG_.data(), matB_.data(), matSpec_.data()};
+                     &scene_.textures, matLayer_.data(), matR_.data(), matG_.data(), matB_.data(),
+                     matRough_.data(), matMetal_.data(), lx_.data(), ly_.data(), lz_.data(), lr_.data(),
+                     lcr_.data(), lcg_.data(), lcb_.data()};
     if (cache.size() < list.size()) cache.resize(list.size());
     done.assign(list.size(), 0);
     auto attrOf = [&](uint32_t k) -> const TriAttr& {
@@ -396,24 +485,89 @@ void Rasterizer::rasterTile(int tile, int tid, const Target& tg, const PassParam
       if (!done[k]) { buildAttr(*list[k], cache[k]); done[k] = 1; }
       return cache[k];
     };
+    // Tiled light culling: 16x16 sub-tiles, screen rectangle + view-depth range.
+    constexpr int kSub = 16, kSubs = kTile / kSub;
+    uint8_t subList[kSubs * kSubs][256];
+    int subCount[kSubs * kSubs] = {};
+    const int nLights = pp.pointLights ? int(lx_.size()) : 0;
+    if (nLights) {
+      for (int sy = 0; sy < kSubs; ++sy)
+        for (int sx = 0; sx < kSubs; ++sx) {
+          const int x0 = tileX + sx * kSub, y0 = tileY + sy * kSub;
+          if (x0 >= tg.w || y0 >= tg.h) continue;
+          float dmin = 1e30f, dmax = 0.0f;
+          for (int yy = 0; yy < kSub; ++yy)
+            for (int xx = 0; xx < kSub; ++xx) {
+              const float d = tb.depth[(sy * kSub + yy) * kTile + sx * kSub + xx];
+              dmin = std::min(dmin, d); dmax = std::max(dmax, d);
+            }
+          if (dmax <= 0.0f) continue;  // all sky
+          const float wmin = kNear / dmax, wmax = dmin > 0.0f ? kNear / dmin : 1e30f;
+          int& n = subCount[sy * kSubs + sx];
+          for (int i = 0; i < nLights && n < 256; ++i) {
+            if (lmaxx_[i] < x0 || lminx_[i] > x0 + kSub - 1 || lmaxy_[i] < y0 || lminy_[i] > y0 + kSub - 1) continue;
+            if (lviewW_[i] + lr_[i] < wmin || lviewW_[i] - lr_[i] > wmax) continue;
+            subList[sy * kSubs + sx][n++] = uint8_t(i);
+          }
+        }
+    }
     for (int y = 0; y < h; ++y) {
       const vf py = set1(float(tileY + y) + 0.5f);
       for (int gx = 0; gx < w; gx += 8) {
         const int o = y * kTile + gx;
         const vi ids = loadi(tb.id + o);
-        vi col;
-        static const bool noShade = std::getenv("JSNOW_PROFILE_NOSHADE") != nullptr;
-        if (noShade || bits(cmpeq(ids, set1i(-1))) == 0xFF) col = set1i(int32_t(kSkyColor));
-        else col = shadeGroup(ids, set1(float(tileX + gx) + 0.5f) + iotaf(), py, s, attrOf);
-        storei(tb.color + o, col);
+        vf r, g, b;
+        if (bits(cmpeq(ids, set1i(-1))) == 0xFF) {
+          r = set1(kSkyColor[0]); g = set1(kSkyColor[1]); b = set1(kSkyColor[2]);
+        } else {
+          const GBuf gb = resolveGroup(ids, set1(float(tileX + gx) + 0.5f) + iotaf(), py, s, attrOf);
+          const int sub = (y / kSub) * kSubs + gx / kSub;
+          lightGroup(gb, s, subList[sub], subCount[sub], r, g, b);
+        }
+        store(tb.hdr[0] + o, r); store(tb.hdr[1] + o, g); store(tb.hdr[2] + o, b);
       }
     }
   }
   for (int y = 0; y < h; ++y) {
-    if (tg.color)
-      std::memcpy(tg.color + size_t(tileY + y) * tg.w + tileX, tb.color + y * kTile, w * sizeof(uint32_t));
+    if (tg.hdr[0])
+      for (int c = 0; c < 3; ++c)
+        std::memcpy(tg.hdr[c] + size_t(tileY + y) * tg.w + tileX, tb.hdr[c] + y * kTile, w * sizeof(float));
     if (tg.depth)
       std::memcpy(tg.depth + size_t(tileY + y) * tg.w + tileX, tb.depth + y * kTile, w * sizeof(float));
+  }
+}
+
+// Point lights: view depth and a conservative screen rectangle per light
+// (projected corners of the sphere's bounding box; full screen when it
+// reaches behind the near plane).
+void Rasterizer::prepareLights(const PassParams& pp, int w, int h) {
+  const auto& L = scene_.lights;
+  const size_t n = L.size();
+  for (auto* v : {&lx_, &ly_, &lz_, &lr_, &lcr_, &lcg_, &lcb_, &lviewW_}) v->resize(n);
+  for (auto* v : {&lminx_, &lminy_, &lmaxx_, &lmaxy_}) v->resize(n);
+  const Mat4& M = pp.viewProj;
+  for (size_t i = 0; i < n; ++i) {
+    const PointLight& l = L[i];
+    lx_[i] = l.pos.x; ly_[i] = l.pos.y; lz_[i] = l.pos.z; lr_[i] = l.radius;
+    lcr_[i] = l.color[0]; lcg_[i] = l.color[1]; lcb_[i] = l.color[2];
+    lviewW_[i] = -(pp.view(2, 0) * l.pos.x + pp.view(2, 1) * l.pos.y + pp.view(2, 2) * l.pos.z + pp.view(2, 3));
+    float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
+    bool behind = false;
+    for (int c = 0; c < 8; ++c) {
+      const float px = l.pos.x + ((c & 1) ? l.radius : -l.radius);
+      const float py = l.pos.y + ((c & 2) ? l.radius : -l.radius);
+      const float pz = l.pos.z + ((c & 4) ? l.radius : -l.radius);
+      const float X = M(0, 0) * px + M(0, 1) * py + M(0, 2) * pz + M(0, 3);
+      const float Y = M(1, 0) * px + M(1, 1) * py + M(1, 2) * pz + M(1, 3);
+      const float W = M(3, 0) * px + M(3, 1) * py + M(3, 2) * pz + M(3, 3);
+      if (W < kNear) { behind = true; break; }
+      const float sx = X / W * pp.vp.ax + pp.vp.bx, sy = Y / W * pp.vp.ay + pp.vp.by;
+      x0 = std::min(x0, sx); x1 = std::max(x1, sx); y0 = std::min(y0, sy); y1 = std::max(y1, sy);
+    }
+    if (behind) { x0 = 0; y0 = 0; x1 = float(w); y1 = float(h); }
+    lminx_[i] = int(std::max(-1.0f, std::floor(x0))); lmaxx_[i] = int(std::min(float(w), std::ceil(x1)));
+    lminy_[i] = int(std::max(-1.0f, std::floor(y0))); lmaxy_[i] = int(std::min(float(h), std::ceil(y1)));
+    if (lviewW_[i] + l.radius < kNear) { lminx_[i] = w + 1; lmaxx_[i] = -2; }  // entirely behind
   }
 }
 
@@ -433,9 +587,11 @@ void Rasterizer::render(const PassParams& pp, const std::vector<DrawItem>& draws
     for (const Material& m : scene_.materials) {
       matLayer_.push_back(m.texture);
       matR_.push_back(m.tint[0]); matG_.push_back(m.tint[1]); matB_.push_back(m.tint[2]);
-      matSpec_.push_back(m.specular);
+      matRough_.push_back(m.roughness);
+      matMetal_.push_back(m.metallic);
     }
   }
+  if (pp.mode == PassMode::Shaded) prepareLights(pp, tg.w, tg.h);
   vblocks_.clear();
   triPrefix_.assign(1, 0);
   for (const DrawItem& d : draws) {

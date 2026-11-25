@@ -32,10 +32,19 @@ struct Object {
   float lodEdge[3] = {0, 0, 0};  // typical triangle edge length (world units) per LOD
 };
 
+// Metallic-roughness PBR material. alpha < 1 = transparent (forward, blended).
 struct Material {
   int texture = 0;
   float tint[3] = {1, 1, 1};
-  float specular = 0.3f;
+  float roughness = 0.6f;
+  float metallic = 0.0f;
+  float alpha = 1.0f;
+};
+
+struct PointLight {
+  Vec3 pos;
+  float radius = 10.0f;    // influence ends here (smooth window)
+  float color[3] = {1, 1, 1};  // linear radiance scale
 };
 
 // Something to draw this pass: a contiguous index range with its vertices.
@@ -49,6 +58,7 @@ struct Scene {
   Mesh mesh;
   std::vector<Object> objects;
   std::vector<Material> materials;
+  std::vector<PointLight> lights;
   TextureArray textures;  // one layer per material texture
   size_t fullDetailTriangles = 0;  // sum of LOD0 triangle counts
   std::string description;

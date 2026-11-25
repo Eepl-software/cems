@@ -37,6 +37,8 @@ Tools installed in the session (needed again in a fresh container):
 | B3+B4 lazy attrs, coarse casters (shadow 2.2) | fast | 142 | 7.02 | 33.9 | 0.30 | 0.79 | 2.94 | 0.46 | – | 0.38 | raster 2.9, shadow 2.2 |
 | B5+B6 hw gather, shadow skip (shadow 4.3) | baseline | 52.9 | 18.91 | ref | 0.60 | 1.65 | 12.40 | – | – | – | raster 12.4 (tile shading) |
 | B5+B6 hw gather, shadow skip (shadow 2.1) | fast | 154 | 6.48 | 33.9 | 0.27 | 0.74 | 2.62 | 0.40 | – | 0.38 | raster 2.6, shadow 2.1 |
+| C1 deferred + PBR + HDR/ACES (shadow 4.3, post 0.84) | baseline | 47.4 | 21.08 | ref | 0.62 | 1.61 | 13.67 | – | – | – | raster+shade 13.7 |
+| C1 deferred + PBR + HDR/ACES (shadow 2.0, post 0.11) | fast | 156 | 6.40 | 32.6 | 0.25 | 0.68 | 2.60 | 0.37 | – | 0.35 | raster+shade 2.6, shadow 2.0 |
 
 ## Decisions log
 - A1: `--fast` = half resolution + reuse (best trade-off found in session 1).
@@ -67,6 +69,17 @@ Tools installed in the session (needed again in a fresh container):
   (max channel diff 2/255, from rcp/rsqrt estimate differences); the forced-scalar build
   (`-DJSNOW_FORCE_SCALAR`) matches too. **Not performance-tested on real Apple Silicon**
   (qemu timings are meaningless); not compile-tested with Apple clang / macOS SDK.
+- C1: tile-based deferred shading. Per 8-px group: resolve a G-buffer (linear albedo,
+  normal, world pos, view depth, roughness, metallic) from the visibility buffer, then a
+  lighting pass: Cook-Torrance (GGX D, Schlick-GGX visibility, Schlick Fresnel) + Lambert,
+  metallic-roughness, sun (3.2 HDR, shadowed) + hemisphere sky ambient. The G-buffer
+  stays in registers/L1 (never written to memory) — the CPU version of on-chip tile
+  memory. Output = linear HDR float planes; `tonemap` (exposure, ACES fit, gamma-2 encode)
+  writes RGBA8. Textures decoded with gamma 2. Materials: roughness/metallic/alpha;
+  30% of spheres metallic (separate RNG keeps sphere placement).
+  **Bug found & fixed in C1**: `Target` gained an `hdr[3]` member and the shadow pass's
+  brace-initialiser silently put the shadow-map pointer into `hdr[1]` → shadows vanished.
+  Bisect showed shadows worked through B7; now `Target` fields are assigned by name.
 
 ## Phase B optimisation rounds
 | round | change | baseline ms before → after | gain | fast ms before → after | gain |
@@ -96,5 +109,4 @@ Quality pass now renders the reference every frame so its caches stay in step.
 - **Phase B stopped after B7**: B5, B6, B7 each gained <10% (stop rule). Phase B total:
   baseline 44.57 → 18.91 ms (2.36x), fast 13.38 → 6.48 ms (2.06x).
   Remaining profile (baseline): tile shading ~8 ms, visibility raster ~4.5 ms, shadow passes 4.4, setup 1.7.
-- Phase C: C1 tile-deferred G-buffer + PBR + HDR + tone mapping; C2 100+ point lights with tiled
-  culling; C3 transparency; C4 bloom; C5 TAA.
+- Phase C: C2 100+ point lights with tiled culling (culling code already in place); C3 transparency; C4 bloom; C5 TAA.

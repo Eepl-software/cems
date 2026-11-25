@@ -25,21 +25,20 @@ struct Viewport {
 
 struct Target {
   int w = 0, h = 0;
-  uint32_t* color = nullptr;  // RGBA8, may be null (depth-only passes)
-  float* depth = nullptr;     // z/w, reversed (larger = closer, 0 = far/sky); may be null
+  float* hdr[3] = {nullptr, nullptr, nullptr};  // linear HDR radiance planes (shaded passes)
+  float* depth = nullptr;  // z/w, reversed (larger = closer, 0 = far/sky); may be null
 };
 
 struct StageTimes {
-  double cull = 0, shadow = 0, vertex = 0, setup = 0, raster = 0, reproject = 0, compose = 0, upscale = 0;
+  double cull = 0, shadow = 0, vertex = 0, setup = 0, raster = 0, reproject = 0, compose = 0, upscale = 0, post = 0;
   StageTimes& operator+=(const StageTimes& o) {
     cull += o.cull; shadow += o.shadow; vertex += o.vertex; setup += o.setup; raster += o.raster;
-    reproject += o.reproject; compose += o.compose; upscale += o.upscale;
+    reproject += o.reproject; compose += o.compose; upscale += o.upscale; post += o.post;
     return *this;
   }
   double rasterTotal() const { return vertex + setup + raster; }
 };
 
-constexpr uint32_t kSkyColor = 0xFFE0B080u;  // RGBA (128,176,224)
 
 // Per-pixel sun shadow lookup, implemented by the shadow module (A3).
 struct ShadowLookup {
@@ -56,8 +55,14 @@ struct PassParams {
   PassMode mode = PassMode::Shaded;
   Vec3 camPos;
   Vec3 sunDir;  // unit vector towards the sun
+  Mat4 view;    // camera view matrix (light culling in view depth)
   const ShadowLookup* shadow = nullptr;
+  bool pointLights = true;
 };
+
+// Lighting constants (linear HDR units).
+constexpr float kSunColor[3] = {3.2f, 2.95f, 2.6f};
+constexpr float kSkyColor[3] = {0.30f, 0.45f, 0.75f};
 
 constexpr int kAttrs = 8;  // u, v, nx, ny, nz, wx, wy, wz
 
@@ -118,13 +123,17 @@ class Rasterizer {
   int tilesX_ = 0, tilesY_ = 0, targetW_ = 0, targetH_ = 0;
   struct TileBuf {
     alignas(64) float depth[kTile * kTile];
-    alignas(64) uint32_t color[kTile * kTile];
+    alignas(64) float hdr[3][kTile * kTile];
     alignas(64) uint32_t id[kTile * kTile];  // visibility buffer: index into the tile triangle list
   };
   std::vector<TileBuf> tileBufs_;
   // Material table in SoA form for per-lane gathers while shading.
   std::vector<int32_t> matLayer_;
-  std::vector<float> matR_, matG_, matB_, matSpec_;
+  std::vector<float> matR_, matG_, matB_, matRough_, matMetal_;
+  // Point lights for this pass: SoA + conservative screen rectangles.
+  std::vector<float> lx_, ly_, lz_, lr_, lcr_, lcg_, lcb_, lviewW_;
+  std::vector<int> lminx_, lminy_, lmaxx_, lmaxy_;
+  void prepareLights(const PassParams& pp, int w, int h);
   size_t binned_ = 0;
 };
 
