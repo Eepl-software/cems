@@ -1,5 +1,6 @@
 #include "spirv.hpp"
 #include "jit.hpp"
+#include "../src/simd.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -745,6 +746,46 @@ void sample8(const Texture* tx, const uint32_t* c, const float* lod, uint32_t* o
   }
   if (tx && (tx->format == 0 || tx->format == 1)) {  // RGBA8 / BGRA8: all four channels per texel fetch
     const int sw = tx->format == 1 ? 2 : 0;          // BGRA: swap R and B
+    // SIMD path: all lanes on one mip level, power-of-two repeat or clamp addressing.
+    {
+      const int level = std::clamp(int(std::floor(lodv[0] + 0.5f)), 0, tx->levels - 1);
+      bool same = true;
+      for (int l = 1; l < L && same; ++l) same = std::clamp(int(std::floor(lodv[l] + 0.5f)), 0, tx->levels - 1) == level;
+      const int w = std::max(1, tx->width >> level), h = std::max(1, tx->height >> level);
+      const int pitch = tx->levelPitch[level];
+      const bool okU = tx->addressU == 2 || (tx->addressU == 0 && (w & (w - 1)) == 0);
+      const bool okV = tx->addressV == 2 || (tx->addressV == 0 && (h & (h - 1)) == 0);
+      if (same && okU && okV && (pitch & 3) == 0) {
+        using namespace jsnow::simd;
+        const uint32_t* base = reinterpret_cast<const uint32_t*>(tx->data + tx->levelOffset[level]);
+        const vf S = as_f(loadui(c)), T = as_f(loadui(c + L));
+        const int pw = pitch / 4;
+        auto wrapX = [&](vi i) { return tx->addressU == 2 ? mini(maxi(i, set1i(0)), set1i(w - 1)) : i & set1i(w - 1); };
+        auto wrapY = [&](vi i) { return tx->addressV == 2 ? mini(maxi(i, set1i(0)), set1i(h - 1)) : i & set1i(h - 1); };
+        vf ch[4];
+        if (!tx->linear) {
+          const vi X = wrapX(trunc_i(floor(S * set1(float(w))))), Y = wrapY(trunc_i(floor(T * set1(float(h)))));
+          const vi t0 = gather(base, Y * set1i(pw) + X);
+          for (int k = 0; k < 4; ++k) ch[k] = to_f(shrv(t0, set1i(8 * k)) & set1i(255)) * set1(1.0f / 255.0f);
+        } else {
+          const vf xx = S * set1(float(w)) - set1(0.5f), yy = T * set1(float(h)) - set1(0.5f);
+          const vf fx = floor(xx), fy = floor(yy);
+          const vf ax = xx - fx, ay = yy - fy;
+          const vi x0 = trunc_i(fx), y0 = trunc_i(fy);
+          const vi xa = wrapX(x0), xb = wrapX(x0 + set1i(1));
+          const vi ra = wrapY(y0) * set1i(pw), rb = wrapY(y0 + set1i(1)) * set1i(pw);
+          const vi ta = gather(base, ra + xa), tb = gather(base, ra + xb), tc = gather(base, rb + xa), td = gather(base, rb + xb);
+          for (int k = 0; k < 4; ++k) {
+            const vi sh = set1i(8 * k), m = set1i(255);
+            const vf A = to_f(shrv(ta, sh) & m), B = to_f(shrv(tb, sh) & m), C = to_f(shrv(tc, sh) & m), D = to_f(shrv(td, sh) & m);
+            const vf top = fma(B - A, ax, A), bot = fma(D - C, ax, C);
+            ch[k] = fma(bot - top, ay, top) * set1(1.0f / 255.0f);
+          }
+        }
+        storeui(out, as_i(ch[sw])); storeui(out + L, as_i(ch[1])); storeui(out + 2 * L, as_i(ch[2 - sw])); storeui(out + 3 * L, as_i(ch[3]));
+        return;
+      }
+    }
     for (int l = 0; l < L; ++l) {
       const int level = std::clamp(int(std::floor(lodv[l] + 0.5f)), 0, tx->levels - 1);
       const int w = std::max(1, tx->width >> level), h = std::max(1, tx->height >> level);

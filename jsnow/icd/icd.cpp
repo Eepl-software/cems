@@ -157,6 +157,10 @@ struct Pipeline {
   VkViewport viewport{};
   VkRect2D scissor{};
   bool dynViewport = false, dynScissor = false;
+  bool depthBias = false, dynDepthBias = false;
+  float dbConst = 0, dbSlope = 0, dbClamp = 0;
+  bool stencilTest = false, dynStencilCmp = false, dynStencilWrite = false, dynStencilRef = false;
+  VkStencilOpState stencil[2]{};  // [0] front, [1] back
 };
 struct Fence { bool signaled = false; };
 struct Semaphore { int dummy; };
@@ -181,6 +185,8 @@ template <class H, class T> H from(T* p) { return reinterpret_cast<H>(p); }
 
 // --------------------------------------------------------------- execution
 struct Exec : spv::Resources {
+  float dbConst = 0, dbSlope = 0, dbClamp = 0;      // vkCmdSetDepthBias
+  uint32_t stCmp[2] = {0xFF, 0xFF}, stWrite[2] = {0xFF, 0xFF}, stRef[2] = {0, 0};  // vkCmdSetStencil*
   Device* dev = nullptr;
   RenderPass* rp = nullptr;
   Framebuffer* fb = nullptr;
@@ -364,10 +370,28 @@ void writeDepth(VkFormat f, uint8_t* p, float d) {
   d = std::clamp(d, 0.0f, 1.0f);
   if (f == VK_FORMAT_D16_UNORM) { uint16_t v = uint16_t(d * 65535.0f + 0.5f); std::memcpy(p, &v, 2); return; }
   if (f == VK_FORMAT_D24_UNORM_S8_UINT || f == VK_FORMAT_X8_D24_UNORM_PACK32) {
-    uint32_t v; std::memcpy(&v, p, 4); v = (v & 0xFF000000u) | uint32_t(d * 16777215.0f + 0.5f); std::memcpy(p, &v, 4);
+    uint32_t v; std::memcpy(&v, p, 4); v = (v & 0xFF000000u) | std::min(0xFFFFFFu, uint32_t(double(d) * 16777215.0 + 0.5)); std::memcpy(p, &v, 4);  // (float would round 2^24-0.5 up to 2^24)
     return;
   }
   std::memcpy(p, &d, 4);
+}
+uint8_t* stencilPtr(VkFormat f, uint8_t* p) {
+  if (f == VK_FORMAT_D24_UNORM_S8_UINT) return p + 3;
+  if (f == VK_FORMAT_D32_SFLOAT_S8_UINT) return p + 4;
+  if (f == VK_FORMAT_S8_UINT) return p;
+  return nullptr;
+}
+uint8_t stencilOp(VkStencilOp op, uint8_t s, uint8_t ref) {
+  switch (op) {
+    case VK_STENCIL_OP_ZERO: return 0;
+    case VK_STENCIL_OP_REPLACE: return ref;
+    case VK_STENCIL_OP_INCREMENT_AND_CLAMP: return s == 255 ? 255 : uint8_t(s + 1);
+    case VK_STENCIL_OP_DECREMENT_AND_CLAMP: return s == 0 ? 0 : uint8_t(s - 1);
+    case VK_STENCIL_OP_INVERT: return uint8_t(~s);
+    case VK_STENCIL_OP_INCREMENT_AND_WRAP: return uint8_t(s + 1);
+    case VK_STENCIL_OP_DECREMENT_AND_WRAP: return uint8_t(s - 1);
+    default: return s;  // KEEP
+  }
 }
 bool depthPass(VkCompareOp op, float z, float d) {
   switch (op) {
@@ -429,7 +453,7 @@ void cmdDraw(Exec& ex, uint32_t count, uint32_t instances, uint32_t first, uint3
 }
 
 struct DrawStats {
-  std::atomic<uint64_t> vsNs{0}, setupNs{0}, fsNs{0}, verts{0}, tris{0}, draws{0}, frags{0};
+  std::atomic<uint64_t> vsNs{0}, setupNs{0}, fsNs{0}, csNs{0}, verts{0}, tris{0}, draws{0}, frags{0};
   ~DrawStats() {
     if (std::getenv("JSNOW_ICD_STATS"))
       std::fprintf(stderr, "[jsnow-icd] %llu draws, %llu vertices, %llu triangles, %llu fragment blocks; time: VS %.0f ms, "
@@ -720,6 +744,30 @@ void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t firstIn
     }
     if (found) inMap.push_back({fi.second, off});
   }
+  uint8_t outFast[4] = {0, 0, 0, 0};  // 1 RGBA8, 2 BGRA8: no blending, full write mask
+  uint32_t fsOutComps[4] = {4, 4, 4, 4};
+  for (size_t oi = 0; oi < fsOut.size() && oi < 4; ++oi) {
+    const auto& fo = fsOut[oi];
+    fsOutComps[oi] = std::min(4u, fs.types[fs.vars[fo.second].type].comps);
+    if (fo.first < 0 || size_t(fo.first) >= sp.color.size() || sp.color[fo.first] == VK_ATTACHMENT_UNUSED) continue;
+    const VkPipelineColorBlendAttachmentState* bs = size_t(fo.first) < P.blends.size() ? &P.blends[fo.first] : nullptr;
+    if (bs && (bs->blendEnable || bs->colorWriteMask != 0xF)) continue;
+    static const bool noFast = std::getenv("JSNOW_ICD_NO_FASTOUT") != nullptr;
+    if (noFast) continue;
+    const VkFormat f = ex.fb->views[sp.color[fo.first]]->format;
+    if (f == VK_FORMAT_R8G8B8A8_UNORM || f == VK_FORMAT_R8G8B8A8_SRGB || f == VK_FORMAT_A8B8G8R8_UNORM_PACK32) outFast[oi] = 1;
+    else if (f == VK_FORMAT_B8G8R8A8_UNORM || f == VK_FORMAT_B8G8R8A8_SRGB) outFast[oi] = 2;
+  }
+  const bool biasOn = P.depthBias && depthView;
+  const float dbConst = P.dynDepthBias ? ex.dbConst : P.dbConst, dbSlope = P.dynDepthBias ? ex.dbSlope : P.dbSlope;
+  const float dbClamp = P.dynDepthBias ? ex.dbClamp : P.dbClamp;
+  static const bool dbgDraw = std::getenv("JSNOW_ICD_DEBUG_DRAWS") != nullptr;
+  std::atomic<uint64_t> dbgCover{0}, dbgPass{0};
+  struct DbgPrint { const bool& on; std::atomic<uint64_t>& c; std::atomic<uint64_t>& p; const Pipeline& P;
+    ~DbgPrint() { if (on) std::fprintf(stderr, "[jsnow-draw] pipe %p stencil %d depthTest %d op %d: covered %llu passed %llu\n",
+        (const void*)&P, P.stencilTest, P.depthTest, int(P.depthOp), (unsigned long long)c, (unsigned long long)p); } }
+    dbgPrint{dbgDraw, dbgCover, dbgPass, P};
+  const bool stencilOn = P.stencilTest && depthView && stencilPtr(depthView->format, depthView->img->at(0, 0, 0, 0));
   const int bands = std::max(1, std::min(ex.dev->pool->size() * 4, (y1 - y0 + 7) / 8));
   // Bin triangles into bands (order preserved within a band).
   std::vector<uint32_t> binStart(size_t(bands) + 1, 0), binIdx;
@@ -767,6 +815,28 @@ void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t firstIn
       const vf d2 = fma(set1(-(B.y - A.y) * inv2), OX, set1((B.x - A.x) * inv2) * OY);
       const vf Az = set1(A.z), Bz = set1(B.z), Cz = set1(C.z), Aq = set1(A.q), Bq = set1(B.q), Cq = set1(C.q);
       const float* tvA = varPool.data() + t.var;
+      float zBias = 0;
+      if (biasOn) {
+        // Vulkan depth bias: m * slope + r * constant, r = minimum resolvable difference of the format.
+        const float dzdx = -(C.y - B.y) * inv2 * A.z - (A.y - C.y) * inv2 * B.z - (B.y - A.y) * inv2 * C.z;
+        const float dzdy = (C.x - B.x) * inv2 * A.z + (A.x - C.x) * inv2 * B.z + (B.x - A.x) * inv2 * C.z;
+        const float m = std::max(std::fabs(dzdx), std::fabs(dzdy));
+        float r = 1.0f / 16777216.0f;
+        if (depthView->format == VK_FORMAT_D16_UNORM) r = 1.0f / 65536.0f;
+        else if (depthView->format == VK_FORMAT_D32_SFLOAT || depthView->format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
+          int e;
+          std::frexp(std::max({std::fabs(A.z), std::fabs(B.z), std::fabs(C.z)}), &e);
+          r = std::ldexp(1.0f, e - 24);
+        }
+        zBias = m * dbSlope + r * dbConst;
+        if (dbClamp > 0) zBias = std::min(zBias, dbClamp);
+        else if (dbClamp < 0) zBias = std::max(zBias, dbClamp);
+      }
+      const VkStencilOpState& sf = P.stencil[t.front ? 0 : 1];
+      const uint32_t fi = t.front ? 0 : 1;
+      const uint32_t stCmp = P.dynStencilCmp ? ex.stCmp[fi] : sf.compareMask;
+      const uint32_t stWm = P.dynStencilWrite ? ex.stWrite[fi] : sf.writeMask;
+      const uint32_t stRef = P.dynStencilRef ? ex.stRef[fi] : sf.reference;
       for (int y = yy0; y <= yy1; y += 2)
         for (int x = bx0; x <= bx1; x += 4) {
           const float cx = x + 0.5f, cy = y + 0.5f;
@@ -779,16 +849,33 @@ void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t firstIn
             }
           if (!cover) continue;
           alignas(32) float l0[8], l1[8], l2[8], z[8], qn[8];
-          const vf Z = fma(L0, Az, fma(L1, Bz, L2 * Cz)), Q = fma(L0, Aq, fma(L1, Bq, L2 * Cq));
+          const vf Z = fma(L0, Az, fma(L1, Bz, L2 * Cz)) + set1(zBias), Q = fma(L0, Aq, fma(L1, Bq, L2 * Cq));
           store(l0, L0); store(l1, L1); store(l2, L2); store(z, Z); store(qn, Q);
-          // Early depth test.
+          // Early stencil + depth test.
           uint8_t pass = cover;
+          if (stencilOn)
+            for (int l = 0; l < 8; ++l)
+              if (pass & (1 << l)) {
+                uint8_t* spp = stencilPtr(depthView->format, depthView->img->at(0, depthView->baseLayer, x + (l & 3), y + (l >> 2)));
+                if (!depthPass(sf.compareOp, float(stRef & stCmp), float(*spp & stCmp))) {
+                  *spp = uint8_t((*spp & ~stWm) | (stencilOp(sf.failOp, *spp, uint8_t(stRef)) & stWm));
+                  pass &= uint8_t(~(1 << l));
+                }
+              }
           if (depthView && P.depthTest)
             for (int l = 0; l < 8; ++l)
               if (pass & (1 << l)) {
-                const uint8_t* dp = depthView->img->at(0, depthView->baseLayer, x + (l & 3), y + (l >> 2));
-                if (!depthPass(P.depthOp, z[l], readDepth(depthView->format, dp))) pass &= uint8_t(~(1 << l));
+                uint8_t* dp = depthView->img->at(0, depthView->baseLayer, x + (l & 3), y + (l >> 2));
+                if (!depthPass(P.depthOp, z[l], readDepth(depthView->format, dp))) {
+                  if (dbgDraw) { static std::atomic<int> once{0}; if (once++ < 3) std::fprintf(stderr, "[jsnow-draw] depth fail z %g d %g fmt %d\n", z[l], readDepth(depthView->format, dp), int(depthView->format)); }
+                  pass &= uint8_t(~(1 << l));
+                  if (stencilOn) {
+                    uint8_t* spp = stencilPtr(depthView->format, dp);
+                    *spp = uint8_t((*spp & ~stWm) | (stencilOp(sf.depthFailOp, *spp, uint8_t(stRef)) & stWm));
+                  }
+                }
               }
+          if (dbgDraw) { dbgCover += __builtin_popcount(cover); dbgPass += __builtin_popcount(pass); }
           if (!pass) continue;
           {
             const vf Wv = set1(1.0f) / Q;
@@ -820,14 +907,36 @@ void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t firstIn
           pass &= uint8_t(~inv.killed());
           if (ex.query && fsOut.empty())
             for (int l = 0; l < 8; ++l) if (pass & (1 << l)) ex.query->fetch_add(1, std::memory_order_relaxed);
+          // 8-bit colour targets without blending: pack all 8 lanes with SIMD.
+          alignas(32) uint32_t packed[4][8];
+          for (size_t oi = 0; oi < fsOut.size() && oi < 4; ++oi) {
+            if (!outFast[oi]) continue;
+            const float* src = inv.output(fsOut[oi].second);
+            vf ch[4];
+            for (int k = 0; k < 4; ++k)
+              ch[k] = k < int(fsOutComps[oi]) ? min(max(loadu(src + k * 8), zerof()), set1(1.0f)) : set1(k == 3 ? 1.0f : 0.0f);
+            if (outFast[oi] == 2) std::swap(ch[0], ch[2]);
+            vi px = set1i(0);
+            for (int k = 0; k < 4; ++k) px = px | shlv(trunc_i(fma(ch[k], set1(255.0f), set1(0.5f))), set1i(8 * k));
+            storei(packed[oi], px);
+          }
           for (int l = 0; l < 8; ++l) {
             if (!(pass & (1 << l))) continue;
             const int X = x + (l & 3), Y = y + (l >> 2);
             if (depthView && P.depthWrite)
               writeDepth(depthView->format, depthView->img->at(0, depthView->baseLayer, X, Y), z[l]);
-            for (auto& fo : fsOut) {  // one output per colour attachment (by location)
+            if (stencilOn) {
+              uint8_t* spp = stencilPtr(depthView->format, depthView->img->at(0, depthView->baseLayer, X, Y));
+              *spp = uint8_t((*spp & ~stWm) | (stencilOp(sf.passOp, *spp, uint8_t(stRef)) & stWm));
+            }
+            for (size_t oi = 0; oi < fsOut.size(); ++oi) {  // one output per colour attachment (by location)
+              const auto& fo = fsOut[oi];
               if (fo.first < 0 || size_t(fo.first) >= sp.color.size() || sp.color[fo.first] == VK_ATTACHMENT_UNUSED) continue;
               ImageView* cv = ex.fb->views[sp.color[fo.first]];
+              if (oi < 4 && outFast[oi]) {
+                std::memcpy(cv->img->at(cv->baseLevel, cv->baseLayer, X, Y), &packed[oi][l], 4);
+                continue;
+              }
               const uint32_t nc = fs.types[fs.vars[fo.second].type].comps;
               float c[4] = {0, 0, 0, 1};
               for (uint32_t ch = 0; ch < std::min(nc, 4u); ++ch) c[ch] = inv.output(fo.second)[ch * 8 + l];
@@ -857,12 +966,15 @@ void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t firstIn
   });
 }
 
-void clearAttachment(ImageView* v, const VkClearValue& cv, const VkRect2D& r) {
+void clearAttachment(ImageView* v, const VkClearValue& cv, const VkRect2D& r, int aspects = 3) {
   Image* im = v->img;
   for (uint32_t y = r.offset.y; y < r.offset.y + r.extent.height && y < im->h; ++y)
     for (uint32_t x = r.offset.x; x < r.offset.x + r.extent.width && x < im->w; ++x) {
       uint8_t* p = im->at(v->baseLevel, v->baseLayer, x, y);
-      if (isDepth(v->format)) writeDepth(v->format, p, cv.depthStencil.depth);
+      if (isDepth(v->format)) {
+        if (aspects & 1) writeDepth(v->format, p, cv.depthStencil.depth);
+        if (aspects & 2) if (uint8_t* sp = stencilPtr(v->format, p)) *sp = uint8_t(cv.depthStencil.stencil);
+      }
       else writeColor(v->format, p, cv.color.float32);
     }
 }
@@ -1345,13 +1457,18 @@ VKAPI VkResult VKAPI_CALL jsnow_CreateGraphicsPipelines(VkDevice, VkPipelineCach
       p->cull = c.pRasterizationState->cullMode;
       p->front = c.pRasterizationState->frontFace;
       if (c.pRasterizationState->polygonMode != VK_POLYGON_MODE_FILL) missing("non-fill polygon mode");
-      if (c.pRasterizationState->depthBiasEnable) missing("depth bias");
+      p->depthBias = c.pRasterizationState->depthBiasEnable;
+      p->dbConst = c.pRasterizationState->depthBiasConstantFactor;
+      p->dbSlope = c.pRasterizationState->depthBiasSlopeFactor;
+      p->dbClamp = c.pRasterizationState->depthBiasClamp;
     }
     if (c.pDepthStencilState) {
       p->depthTest = c.pDepthStencilState->depthTestEnable;
       p->depthWrite = c.pDepthStencilState->depthWriteEnable;
       p->depthOp = c.pDepthStencilState->depthCompareOp;
-      if (c.pDepthStencilState->stencilTestEnable) missing("stencil test");
+      p->stencilTest = c.pDepthStencilState->stencilTestEnable;
+      p->stencil[0] = c.pDepthStencilState->front;
+      p->stencil[1] = c.pDepthStencilState->back;
     }
     if (c.pColorBlendState && c.pColorBlendState->attachmentCount) {
       p->blends.assign(c.pColorBlendState->pAttachments, c.pColorBlendState->pAttachments + c.pColorBlendState->attachmentCount);
@@ -1368,6 +1485,11 @@ VKAPI VkResult VKAPI_CALL jsnow_CreateGraphicsPipelines(VkDevice, VkPipelineCach
         const VkDynamicState d = c.pDynamicState->pDynamicStates[k];
         if (d == VK_DYNAMIC_STATE_VIEWPORT) p->dynViewport = true;
         else if (d == VK_DYNAMIC_STATE_SCISSOR) p->dynScissor = true;
+        else if (d == VK_DYNAMIC_STATE_DEPTH_BIAS) p->dynDepthBias = true;
+        else if (d == VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK) p->dynStencilCmp = true;
+        else if (d == VK_DYNAMIC_STATE_STENCIL_WRITE_MASK) p->dynStencilWrite = true;
+        else if (d == VK_DYNAMIC_STATE_STENCIL_REFERENCE) p->dynStencilRef = true;
+        else if (d == VK_DYNAMIC_STATE_BLEND_CONSTANTS || d == VK_DYNAMIC_STATE_LINE_WIDTH) {}
         else missing("dynamic state " + std::to_string(int(d)));
       }
     if (c.pMultisampleState && c.pMultisampleState->rasterizationSamples != VK_SAMPLE_COUNT_1_BIT) missing("MSAA");
@@ -1405,6 +1527,8 @@ void cmdDispatch(Exec& ex, uint32_t gx, uint32_t gy, uint32_t gz, uint32_t bx, u
   const uint64_t groups = uint64_t(gx) * gy * gz;
   if (!groups) return;
   ex.computeMode = true;
+  const auto tCs = sclk::now();
+  struct CsTimer { sclk::time_point t; ~CsTimer() { gStats.csNs += nsSince(t); } } csTimer{tCs};
   const uint32_t batches = (local + 7) / 8;
   const bool group = cs.usesWorkgroupMemory();  // shared memory / barriers: run batches together
   const int tasks = int(std::min<uint64_t>(groups, 4096));
@@ -1512,8 +1636,14 @@ VKAPI void VKAPI_CALL jsnow_CmdBeginRenderPass(VkCommandBuffer c, const VkRender
     ex.rp = rp; ex.fb = fb; ex.area = area; ex.subpass = 0;
     for (size_t i = 0; i < rp->att.size() && i < fb->views.size(); ++i) {
       const bool depth = isDepth(rp->att[i].format);
-      if (rp->att[i].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR && i < clears.size()) clearAttachment(fb->views[i], clears[i], area);
-      (void)depth;
+      if (i >= clears.size()) continue;
+      const int aspects = (rp->att[i].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ? 1 : 0) |
+                          (depth && rp->att[i].stencilLoadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ? 2 : 0);
+      if (aspects) clearAttachment(fb->views[i], clears[i], area, depth ? aspects : 1);
+      static const bool dbg = std::getenv("JSNOW_ICD_DEBUG_DRAWS") != nullptr;
+      if (dbg && depth) std::fprintf(stderr, "[jsnow-draw] clear att %zu fmt %d isDepth %d area %d,%d %ux%u img %ux%u aspects %d value %g -> reads %g\n", i,
+                                     int(fb->views[i]->format), int(isDepth(fb->views[i]->format)), area.offset.x, area.offset.y, area.extent.width, area.extent.height, fb->views[i]->img->w, fb->views[i]->img->h, aspects,
+                                     clears[i].depthStencil.depth, readDepth(fb->views[i]->format, fb->views[i]->img->at(0, 0, 10, 10)));
     }
   });
 }
@@ -1663,7 +1793,9 @@ VKAPI void VKAPI_CALL jsnow_CmdClearAttachments(VkCommandBuffer c, uint32_t na, 
       const Subpass& sp = ex.rp->sub[std::min<size_t>(ex.subpass, ex.rp->sub.size() - 1)];
       if (at.aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) v = ex.fb->views[sp.color[at.colorAttachment]];
       else if (sp.depth >= 0) v = ex.fb->views[sp.depth];
-      if (v) for (auto& rr : rs) clearAttachment(v, at.clearValue, rr.rect);
+      const int aspects = (at.aspectMask & (VK_IMAGE_ASPECT_COLOR_BIT | VK_IMAGE_ASPECT_DEPTH_BIT) ? 1 : 0) |
+                          (at.aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT ? 2 : 0);
+      if (v) for (auto& rr : rs) clearAttachment(v, at.clearValue, rr.rect, aspects);
     }
   });
 }
@@ -1685,7 +1817,9 @@ VKAPI void VKAPI_CALL jsnow_CmdExecuteCommands(VkCommandBuffer c, uint32_t n, co
   REC(c)([=](Exec& ex) { for (auto* cb : v) for (auto& f : cb->cmds) f(ex); });
 }
 VKAPI void VKAPI_CALL jsnow_CmdSetLineWidth(VkCommandBuffer, float) {}
-VKAPI void VKAPI_CALL jsnow_CmdSetDepthBias(VkCommandBuffer, float, float, float) { missing("vkCmdSetDepthBias"); }
+VKAPI void VKAPI_CALL jsnow_CmdSetDepthBias(VkCommandBuffer c, float k, float clamp, float slope) {
+  REC(c)([=](Exec& ex) { ex.dbConst = k; ex.dbClamp = clamp; ex.dbSlope = slope; });
+}
 VKAPI void VKAPI_CALL jsnow_CmdSetBlendConstants(VkCommandBuffer, const float[4]) { missing("blend constants"); }
 VKAPI void VKAPI_CALL jsnow_CmdDispatch(VkCommandBuffer c, uint32_t x, uint32_t y, uint32_t z) {
   REC(c)([=](Exec& ex) { cmdDispatch(ex, x, y, z, 0, 0, 0); });
@@ -1705,8 +1839,17 @@ VKAPI VkResult VKAPI_CALL jsnow_QueueSubmit(VkQueue q, uint32_t n, const VkSubmi
   if (f) to<Fence>(f)->signaled = true;
   totalMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
   ++submits;
-  if (std::getenv("JSNOW_ICD_STATS") && submits % 100 == 0)
-    std::fprintf(stderr, "[jsnow-icd] %llu submits, avg %.3f ms GPU work per submit\n", (unsigned long long)submits, totalMs / submits);
+  if (std::getenv("JSNOW_ICD_STATS") && submits % 100 == 0) {
+    static double lastMs = 0;
+    static uint64_t lv = 0, ls = 0, lf = 0, lc = 0, ld = 0, lt = 0, lb = 0;
+    const uint64_t v = gStats.vsNs, su = gStats.setupNs, fsn = gStats.fsNs, c = gStats.csNs, d = gStats.draws,
+                   t = gStats.tris, b = gStats.frags;
+    std::fprintf(stderr, "[jsnow-icd] %llu submits, avg %.3f ms GPU work per submit; last 100: %.2f ms/submit = VS %.2f + "
+                 "setup %.2f + raster/FS %.2f + compute %.2f (+ other); %.0f draws, %.0f tris, %.0f blocks per submit\n",
+                 (unsigned long long)submits, totalMs / submits, (totalMs - lastMs) / 100, (v - lv) / 1e8, (su - ls) / 1e8,
+                 (fsn - lf) / 1e8, (c - lc) / 1e8, (d - ld) / 100.0, (t - lt) / 100.0, (b - lb) / 100.0);
+    lastMs = totalMs; lv = v; ls = su; lf = fsn; lc = c; ld = d; lt = t; lb = b;
+  }
   return VK_SUCCESS;
 }
 
@@ -1879,9 +2022,15 @@ VKAPI void VKAPI_CALL jsnow_CmdResolveImage(VkCommandBuffer c, VkImage s, VkImag
   for (uint32_t i = 0; i < n; ++i) cp.push_back({r[i].srcSubresource, r[i].srcOffset, r[i].dstSubresource, r[i].dstOffset, r[i].extent});
   jsnow_CmdCopyImage(c, s, l1, d, l2, n, cp.data());
 }
-VKAPI void VKAPI_CALL jsnow_CmdSetStencilCompareMask(VkCommandBuffer, VkStencilFaceFlags, uint32_t) {}
-VKAPI void VKAPI_CALL jsnow_CmdSetStencilWriteMask(VkCommandBuffer, VkStencilFaceFlags, uint32_t) {}
-VKAPI void VKAPI_CALL jsnow_CmdSetStencilReference(VkCommandBuffer, VkStencilFaceFlags, uint32_t) {}
+VKAPI void VKAPI_CALL jsnow_CmdSetStencilCompareMask(VkCommandBuffer c, VkStencilFaceFlags f, uint32_t v) {
+  REC(c)([=](Exec& ex) { if (f & 1) ex.stCmp[0] = v; if (f & 2) ex.stCmp[1] = v; });
+}
+VKAPI void VKAPI_CALL jsnow_CmdSetStencilWriteMask(VkCommandBuffer c, VkStencilFaceFlags f, uint32_t v) {
+  REC(c)([=](Exec& ex) { if (f & 1) ex.stWrite[0] = v; if (f & 2) ex.stWrite[1] = v; });
+}
+VKAPI void VKAPI_CALL jsnow_CmdSetStencilReference(VkCommandBuffer c, VkStencilFaceFlags f, uint32_t v) {
+  REC(c)([=](Exec& ex) { if (f & 1) ex.stRef[0] = v; if (f & 2) ex.stRef[1] = v; });
+}
 VKAPI void VKAPI_CALL jsnow_CmdSetDepthBounds(VkCommandBuffer, float, float) { missing("depth bounds test"); }
 VKAPI void VKAPI_CALL jsnow_GetRenderAreaGranularity(VkDevice, VkRenderPass, VkExtent2D* g) { *g = {1, 1}; }
 VKAPI VkResult VKAPI_CALL jsnow_MergePipelineCaches(VkDevice, VkPipelineCache, uint32_t, const VkPipelineCache*) { return VK_SUCCESS; }
