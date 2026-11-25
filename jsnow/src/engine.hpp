@@ -17,6 +17,7 @@ struct Options {
   bool shadows = true;   // sun cascaded shadow maps
   bool pointLights = true;
   bool transparency = true;
+  bool bloom = true;
   float exposure = 1.6f;
   int outW = 1920, outH = 1080;
   std::string name() const;
@@ -53,6 +54,7 @@ class Engine {
   Rasterizer rast_;
   std::unique_ptr<ShadowMaps> shadows_;
   Reprojector reproj_;
+  Bloom bloom_;
   int W_, H_;
   std::vector<uint32_t> color_[2];
   std::vector<float> depth_[2];

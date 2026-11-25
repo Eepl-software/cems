@@ -27,6 +27,12 @@ struct Target {
   int w = 0, h = 0;
   float* hdr[3] = {nullptr, nullptr, nullptr};  // linear HDR radiance planes (shaded passes)
   float* depth = nullptr;  // z/w, reversed (larger = closer, 0 = far/sky); may be null
+  // Optional fused bloom bright pass: each tile writes its factor x factor box
+  // average of min(hdr, 16) - threshold (clamped at 0) into these planes
+  // (width w / factor), straight from the L1-resident tile.
+  float* bright[3] = {nullptr, nullptr, nullptr};
+  int brightFactor = 4;
+  float brightThreshold = 1.0f;
 };
 
 struct StageTimes {

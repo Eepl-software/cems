@@ -4,6 +4,8 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 
 namespace jsnow {
 
@@ -80,11 +82,33 @@ void Engine::renderScene(const Camera& cam, const Viewport& vp, int w, int h, st
   pp.sunDir = sunDirection();
   pp.shadow = shadows_.get();
   pp.pointLights = o_.pointLights;
-  Target t{w, h, {hdr[0].data(), hdr[1].data(), hdr[2].data()}, depth};
+  Target t;
+  t.w = w; t.h = h;
+  for (int c = 0; c < 3; ++c) t.hdr[c] = hdr[c].data();
+  t.depth = depth;
+  // Bloom level 0 at 1/4 of the output resolution for every internal resolution.
+  const int bloomFactor = std::max(1, 4 * w / o_.outW);
+  const bool fusedBloom = o_.bloom && w % bloomFactor == 0 && h % bloomFactor == 0;
+  if (fusedBloom) {
+    for (int c = 0; c < 3; ++c) t.bright[c] = bloom_.level0(c, w, h, bloomFactor);
+    t.brightFactor = bloomFactor;
+    t.brightThreshold = 1.0f;
+  }
   rast_.render(pp, draws_, t, st, &transparentDraws_);
   a = clk::now();
   const float* planes[3] = {hdr[0].data(), hdr[1].data(), hdr[2].data()};
-  tonemap(pool_, w, h, planes, o_.exposure, ldr);
+  if (o_.bloom) {
+    if (fusedBloom) bloom_.runFromLevel0(pool_);
+    else bloom_.run(pool_, w, h, planes, 1.0f, bloomFactor);
+    if (std::getenv("JSNOW_BLOOM_DEBUG")) {
+      static double acc = 0; static int n = 0;
+      acc += ms(a, clk::now());
+      if (++n % 50 == 0) std::fprintf(stderr, "bloom chain %.2f ms\n", acc / n);
+    }
+    tonemap(pool_, w, h, planes, o_.exposure, ldr, &bloom_, 0.35f);
+  } else {
+    tonemap(pool_, w, h, planes, o_.exposure, ldr);
+  }
   st.post += ms(a, clk::now());
 }
 

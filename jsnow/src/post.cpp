@@ -197,33 +197,209 @@ void composeInterleaved(ThreadPool& pool, int w, int h, int ox, int oy, const ui
   });
 }
 
-void tonemap(ThreadPool& pool, int w, int h, const float* const hdr[3], float exposure, uint32_t* out) {
+void Bloom::allocate(int w, int h, int factor) {
+  factor_ = factor;
+  for (int l = 0; l < kLevels; ++l) {
+    const int lw = std::max(1, (w / factor) >> l), lh = std::max(1, (h / factor) >> l);
+    if (lv_[l].w != lw || lv_[l].h != lh) {
+      lv_[l].w = lw; lv_[l].h = lh;
+      for (int c = 0; c < 3; ++c) { lv_[l].p[c].assign(size_t(lw) * lh, 0.0f); lv_[l].tmp[c].assign(size_t(lw) * lh, 0.0f); }
+    }
+  }
+}
+
+float* Bloom::level0(int c, int w, int h, int factor) {
+  allocate(w, h, factor);
+  return lv_[0].p[c].data();
+}
+
+void Bloom::run(ThreadPool& pool, int w, int h, const float* const hdr[3], float threshold, int factor) {
+  allocate(w, h, factor);
+  // Level 0: bright pass + 4x4 box downsample (quarter resolution).
+  {
+    Level& L = lv_[0];
+    pool.run(L.h, [&](int y, int) {
+      for (int c = 0; c < 3; ++c) {
+        float* o = L.p[c].data() + size_t(y) * L.w;
+        for (int x = 0; x < L.w; ++x) o[x] = 0.0f;
+        for (int k = 0; k < factor; ++k) {
+          const float* r = hdr[c] + size_t(factor * y + k) * w;
+          // Firefly suppression: clamp each sample so single extreme specular
+          // pixels cannot dominate the bloom.
+          for (int x = 0; x < L.w; ++x)
+            for (int j = 0; j < factor; ++j) o[x] += std::min(r[factor * x + j], 16.0f);
+        }
+        const float norm = 1.0f / float(factor * factor);
+        for (int x = 0; x < L.w; ++x) o[x] = std::max(o[x] * norm - threshold, 0.0f);
+      }
+    });
+  }
+  runFromLevel0(pool);
+}
+
+void Bloom::runFromLevel0(ThreadPool& pool) {
+  // Blur helpers for one level (rows [y0, y1)).
+  auto blurH = [](Level& L, int y0, int y1) {
+    for (int y = y0; y < y1; ++y)
+      for (int c = 0; c < 3; ++c) {
+        const float* r = L.p[c].data() + size_t(y) * L.w;
+        float* o = L.tmp[c].data() + size_t(y) * L.w;
+        auto at = [&](int i) { return r[std::clamp(i, 0, L.w - 1)]; };
+        auto edge = [&](int x) { o[x] = (at(x - 2) + 4 * at(x - 1) + 6 * r[x] + 4 * at(x + 1) + at(x + 2)) * (1.0f / 16); };
+        if (L.w < 5) { for (int x = 0; x < L.w; ++x) edge(x); continue; }
+        edge(0); edge(1);
+        for (int x = 2; x < L.w - 2; ++x)  // interior: straight loop, vectorized
+          o[x] = (r[x - 2] + 4 * r[x - 1] + 6 * r[x] + 4 * r[x + 1] + r[x + 2]) * (1.0f / 16);
+        edge(L.w - 2); edge(L.w - 1);
+      }
+  };
+  auto blurV = [](Level& L, int y0, int y1) {
+    for (int y = y0; y < y1; ++y)
+      for (int c = 0; c < 3; ++c) {
+        const float* t = L.tmp[c].data();
+        const float* rm2 = t + size_t(std::max(y - 2, 0)) * L.w;
+        const float* rm1 = t + size_t(std::max(y - 1, 0)) * L.w;
+        const float* r0 = t + size_t(y) * L.w;
+        const float* rp1 = t + size_t(std::min(y + 1, L.h - 1)) * L.w;
+        const float* rp2 = t + size_t(std::min(y + 2, L.h - 1)) * L.w;
+        float* o = L.p[c].data() + size_t(y) * L.w;
+        for (int x = 0; x < L.w; ++x) o[x] = (rm2[x] + 4 * rm1[x] + 6 * r0[x] + 4 * rp1[x] + rp2[x]) * (1.0f / 16);
+      }
+  };
+  Level& L0 = lv_[0];
+  const int bands = (L0.h + 15) / 16;
+  pool.run(bands, [&](int b, int) { blurH(L0, b * 16, std::min(L0.h, b * 16 + 16)); });
+  pool.run(bands, [&](int b, int) { blurV(L0, b * 16, std::min(L0.h, b * 16 + 16)); });
+  // Levels 1.. are tiny (1/8 res and below): one task does the whole chain,
+  // the other workers stay idle for this short step.
+  for (int l = 1; l < kLevels; ++l) {
+    const Level& S = lv_[l - 1];
+    Level& L = lv_[l];
+    for (int y = 0; y < L.h; ++y)
+      for (int c = 0; c < 3; ++c) {
+        const int y0 = std::min(2 * y, S.h - 1), y1 = std::min(2 * y + 1, S.h - 1);
+        const float* r0 = S.p[c].data() + size_t(y0) * S.w;
+        const float* r1 = S.p[c].data() + size_t(y1) * S.w;
+        float* o = L.p[c].data() + size_t(y) * L.w;
+        for (int x = 0; x < L.w; ++x) {
+          const int x0 = std::min(2 * x, S.w - 1), x1 = std::min(2 * x + 1, S.w - 1);
+          o[x] = 0.25f * (r0[x0] + r0[x1] + r1[x0] + r1[x1]);
+        }
+      }
+    blurH(L, 0, L.h);
+    blurV(L, 0, L.h);
+  }
+  // 2x bilinear (9:3:3:1 tent) upsample of S added into D, rows [y0, y1).
+  auto upsampleAdd = [](const Level& S, Level& D, int y0, int y1) {
+    for (int y = y0; y < y1; ++y) {
+      const int j = std::min(y >> 1, S.h - 1);
+      const int j2 = std::clamp((y & 1) ? j + 1 : j - 1, 0, S.h - 1);
+      for (int c = 0; c < 3; ++c) {
+        const float* r0 = S.p[c].data() + size_t(j) * S.w;
+        const float* r1 = S.p[c].data() + size_t(j2) * S.w;
+        float* o = D.p[c].data() + size_t(y) * D.w;
+        for (int x = 0; x < D.w; ++x) {
+          const int i = std::min(x >> 1, S.w - 1);
+          const int i2 = std::clamp((x & 1) ? i + 1 : i - 1, 0, S.w - 1);
+          o[x] += 0.5625f * r0[i] + 0.1875f * (r0[i2] + r1[i]) + 0.0625f * r1[i2];
+        }
+      }
+    }
+  };
+  for (int l = kLevels - 1; l > 1; --l) upsampleAdd(lv_[l], lv_[l - 1], 0, lv_[l - 1].h);
+  pool.run(bands, [&](int b, int) { upsampleAdd(lv_[1], L0, b * 16, std::min(L0.h, b * 16 + 16)); });
+}
+
+void tonemap(ThreadPool& pool, int w, int h, const float* const hdr[3], float exposure, uint32_t* out,
+             const Bloom* bloom, float bloomStrength) {
   using namespace simd;
-  const size_t n = size_t(w) * h;
-  const int blocksN = int((n + 16383) / 16384);
-  pool.run(blocksN, [&](int b, int) {
-    const size_t i0 = size_t(b) * 16384, i1 = std::min(n, i0 + 16384);
-    size_t i = i0;
+  pool.run((h + 7) / 8, [&](int blk, int) {
+    static thread_local std::vector<float> brow[3];
     auto aces = [](vf x) {
       const vf num = x * fma(x, set1(2.51f), set1(0.03f));
       const vf den = fma(x, fma(x, set1(2.43f), set1(0.59f)), set1(0.14f));
       return clamp(num / den, zerof(), set1(1.0f));
     };
     const vf e = set1(exposure), k = set1(255.0f), half = set1(0.5f);
-    for (; i + 8 <= i1; i += 8) {
-      const vi r = trunc_i(fma(sqrt(aces(loadu(hdr[0] + i) * e)), k, half));
-      const vi g = trunc_i(fma(sqrt(aces(loadu(hdr[1] + i) * e)), k, half));
-      const vi bb = trunc_i(fma(sqrt(aces(loadu(hdr[2] + i) * e)), k, half));
-      storeui(out + i, r | shl<8>(g) | shl<16>(bb) | set1i(int32_t(0xFF000000u)));
-    }
-    for (; i < i1; ++i) {
-      uint32_t px = 0xFF000000u;
-      for (int c = 0; c < 3; ++c) {
-        const float x = hdr[c][i] * exposure;
-        const float y = std::clamp(x * (2.51f * x + 0.03f) / (x * (2.43f * x + 0.59f) + 0.14f), 0.0f, 1.0f);
-        px |= uint32_t(std::sqrt(y) * 255.0f + 0.5f) << (8 * c);
+    for (int y = blk * 8; y < std::min(h, blk * 8 + 8); ++y) {
+      const size_t i0 = size_t(y) * w;
+      const float* src[3] = {hdr[0] + i0, hdr[1] + i0, hdr[2] + i0};
+      if (bloom) {
+        // Bilinear 2x upsample of the half-resolution bloom into a row buffer.
+        const int bw = bloom->width(), bh = bloom->height();
+        const float inv = 1.0f / float(bloom->factor());
+        const float fy = std::clamp((y + 0.5f) * inv - 0.5f, 0.0f, float(bh - 1));
+        // Per-column bilinear taps (same for every row of this width).
+        static thread_local std::vector<int> cx0;
+        static thread_local std::vector<float> cax;
+        static thread_local int cw = -1, cbw = -1;
+        if (cw != w || cbw != bw) {
+          cw = w; cbw = bw;
+          cx0.resize(w); cax.resize(w);
+          for (int x = 0; x < w; ++x) {
+            const float fx = std::clamp((x + 0.5f) * inv - 0.5f, 0.0f, float(bw - 1));
+            cx0[x] = std::min(int(fx), bw - 2 < 0 ? 0 : bw - 2);
+            cax[x] = bw > 1 ? fx - cx0[x] : 0.0f;
+          }
+        }
+        const int by0 = int(fy), by1 = std::min(by0 + 1, bh - 1);
+        const float ay = fy - by0;
+        static thread_local std::vector<float> vrow;
+        vrow.resize(bw);
+        for (int c = 0; c < 3; ++c) {
+          brow[c].resize(w);
+          const float* p0 = bloom->plane(c) + size_t(by0) * bw;
+          const float* p1 = bloom->plane(c) + size_t(by1) * bw;
+          // Vertical lerp at bloom width, then horizontal bilinear.
+          for (int x = 0; x < bw; ++x) vrow[x] = bloomStrength * (p0[x] + ay * (p1[x] - p0[x]));
+          float* o = brow[c].data();
+          const float* sc = src[c];
+          const int f = bloom->factor();
+          if ((f == 4 || f == 2) && bw * f == w && bw >= 2) {
+            // Fixed bilinear weight pattern per output phase (no index arrays).
+            auto V = [&](int i) { return vrow[std::clamp(i, 0, bw - 1)]; };
+            if (f == 4) {
+              for (int i = 0; i < bw; ++i) {
+                const float l = V(i - 1), m = vrow[i], r = V(i + 1);
+                o[4 * i] = sc[4 * i] + 0.375f * l + 0.625f * m;
+                o[4 * i + 1] = sc[4 * i + 1] + 0.125f * l + 0.875f * m;
+                o[4 * i + 2] = sc[4 * i + 2] + 0.875f * m + 0.125f * r;
+                o[4 * i + 3] = sc[4 * i + 3] + 0.625f * m + 0.375f * r;
+              }
+            } else {
+              for (int i = 0; i < bw; ++i) {
+                const float l = V(i - 1), m = vrow[i], r = V(i + 1);
+                o[2 * i] = sc[2 * i] + 0.25f * l + 0.75f * m;
+                o[2 * i + 1] = sc[2 * i + 1] + 0.75f * m + 0.25f * r;
+              }
+            }
+          } else {
+            vrow.push_back(vrow.back());  // guard for the x0+1 tap
+            for (int x = 0; x < w; ++x) {
+              const float a0 = vrow[cx0[x]], a1 = vrow[cx0[x] + 1];
+              o[x] = sc[x] + a0 + cax[x] * (a1 - a0);
+            }
+            vrow.pop_back();
+          }
+          src[c] = brow[c].data();
+        }
       }
-      out[i] = px;
+      int x = 0;
+      for (; x + 8 <= w; x += 8) {
+        const vi r = trunc_i(fma(sqrt(aces(loadu(src[0] + x) * e)), k, half));
+        const vi g = trunc_i(fma(sqrt(aces(loadu(src[1] + x) * e)), k, half));
+        const vi bb = trunc_i(fma(sqrt(aces(loadu(src[2] + x) * e)), k, half));
+        storeui(out + i0 + x, r | shl<8>(g) | shl<16>(bb) | set1i(int32_t(0xFF000000u)));
+      }
+      for (; x < w; ++x) {
+        uint32_t px = 0xFF000000u;
+        for (int c = 0; c < 3; ++c) {
+          const float v = src[c][x] * exposure;
+          const float t = std::clamp(v * (2.51f * v + 0.03f) / (v * (2.43f * v + 0.59f) + 0.14f), 0.0f, 1.0f);
+          px |= uint32_t(std::sqrt(t) * 255.0f + 0.5f) << (8 * c);
+        }
+        out[i0 + x] = px;
+      }
     }
   });
 }

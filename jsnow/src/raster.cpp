@@ -590,6 +590,20 @@ void Rasterizer::rasterTile(int tile, int tid, const Target& tg, const PassParam
       }
     }
   }
+  if (tg.bright[0] && shaded) {
+    const int f = tg.brightFactor, bw = tg.w / f;
+    const float norm = 1.0f / float(f * f);
+    for (int by = 0; by < h / f; ++by)
+      for (int c = 0; c < 3; ++c) {
+        float* o = tg.bright[c] + size_t(tileY / f + by) * bw + tileX / f;
+        for (int bx = 0; bx < w / f; ++bx) {
+          float sum = 0.0f;
+          for (int yy = 0; yy < f; ++yy)
+            for (int xx = 0; xx < f; ++xx) sum += std::min(tb.hdr[c][(by * f + yy) * kTile + bx * f + xx], 16.0f);
+          o[bx] = std::max(sum * norm - tg.brightThreshold, 0.0f);
+        }
+      }
+  }
   for (int y = 0; y < h; ++y) {
     if (tg.hdr[0])
       for (int c = 0; c < 3; ++c)

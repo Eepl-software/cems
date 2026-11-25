@@ -36,8 +36,38 @@ void composeInterleaved(ThreadPool& pool, int w, int h, int ox, int oy, const ui
 void scatterInterleaved(ThreadPool& pool, int w, int h, int ox, int oy, const uint32_t* subColor,
                         const float* subDepth, uint32_t* color, float* depth);
 
-// HDR -> display: exposure, ACES filmic curve (Narkowicz fit), gamma 2 encode.
-void tonemap(ThreadPool& pool, int w, int h, const float* const hdr[3], float exposure, uint32_t* out);
+// HDR bloom: bright-pass + 4x4 downsample to quarter resolution, a chain of
+// half-size levels each blurred with a separable 5-tap Gaussian, then
+// upsampled and accumulated back into level 0 (quarter resolution).
+class Bloom {
+ public:
+  static constexpr int kLevels = 5;
+  // factor: first downsample (power of two); choose it so level 0 is 1/4 of
+  // the *output* resolution whatever the internal resolution is.
+  void run(ThreadPool& pool, int w, int h, const float* const hdr[3], float threshold, int factor = 4);
+  int factor() const { return factor_; }
+  // Fused path: allocate level 0 for (w, h, factor) and return its planes so
+  // the rasterizer can fill it per tile; then call runFromLevel0().
+  float* level0(int c, int w, int h, int factor);
+  void runFromLevel0(ThreadPool& pool);
+  const float* plane(int c) const { return lv_[0].p[c].data(); }
+  int width() const { return lv_[0].w; }
+  int height() const { return lv_[0].h; }
+
+ private:
+  struct Level {
+    int w = 0, h = 0;
+    std::vector<float> p[3], tmp[3];
+  };
+  void allocate(int w, int h, int factor);
+  Level lv_[kLevels];
+  int factor_ = 4;
+};
+
+// HDR -> display: optional bloom (bilinear upsample of the low-res bloom,
+// scaled by bloomStrength), exposure, ACES filmic curve (Narkowicz fit), gamma-2 encode.
+void tonemap(ThreadPool& pool, int w, int h, const float* const hdr[3], float exposure, uint32_t* out,
+             const Bloom* bloom = nullptr, float bloomStrength = 0.0f);
 
 // Trick 1: 2x bilinear upscale, w x h -> 2w x 2h.
 void upscale2x(ThreadPool& pool, int w, int h, const uint32_t* src, uint32_t* dst);

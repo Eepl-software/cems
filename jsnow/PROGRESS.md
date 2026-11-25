@@ -43,6 +43,8 @@ Tools installed in the session (needed again in a fresh container):
 | C2 128 point lights (shadow 2.2, post 0.14) | fast | 130 | 7.71 | 33.0 | 0.32 | 0.84 | 3.36 | 0.42 | – | 0.41 | raster+shade 3.4, shadow 2.2 |
 | C3 transparency (shadow 4.4, post 0.84) | baseline | 38.0 | 26.29 | ref | 0.63 | 1.73 | 18.68 | – | – | – | raster+shade 18.7 (water re-lit forward ≈ +3) |
 | C3 transparency (shadow 2.1, post 0.11) | fast | 130 | 7.70 | 32.7 | 0.30 | 0.80 | 3.65 | 0.40 | – | 0.37 | raster+shade 3.7 |
+| C4 bloom (shadow 4.5, post 3.6) | baseline | 31.9 | 31.31 | ref | 0.70 | 1.86 | 20.62 | – | – | – | raster+shade 20.6 (incl. fused bright pass), post 3.6 |
+| C4 bloom (shadow 2.2, post 0.87) | fast | 107 | 9.35 | 32.6 | 0.34 | 0.88 | 4.23 | 0.43 | – | 0.38 | raster+shade 4.2 |
 
 ## Decisions log
 - A1: `--fast` = half resolution + reuse (best trade-off found in session 1).
@@ -101,6 +103,18 @@ Tools installed in the session (needed again in a fresh container):
   objects cast no shadows; per-triangle (not per-pixel) sorting; sub-tile light lists use
   opaque depth bounds, so a light in front of all opaque surfaces of a sub-tile can miss
   a glass sphere; reprojection uses opaque depth for transparent pixels. `--no-transparency`.
+- C4: HDR bloom. Bright pass (threshold 1.0, firefly clamp 16 per sample) + box downsample
+  to 1/4 of the *output* resolution (factor 4 at full res, 2 at half res / checker), fused
+  into the rasterizer's tile write-out (the tile is still in L1, saves re-reading 24 MB of
+  HDR). 5 levels, separable 5-tap Gaussian per level, 9:3:3:1 bilinear upsample-accumulate;
+  levels 1-4 run serially in one task (tiny). Tone mapping adds bloom (strength 0.35)
+  with a bilinear upsample using fixed per-phase weights. Bloom costs ≈ 2.5 ms at 1080p
+  (noisy: 1.5-5 ms). `--no-bloom`, `JSNOW_BLOOM_DEBUG=1`.
+  Fixed on the way: first version cost 10 ms (non-vectorizable clamped loops), and
+  `--fast` PSNR fell to 21 dB because single-pixel specular "fireflies" (HDR ~1e3 on smooth
+  metal/glass) dominated the bloom differently at each resolution and coarse levels were
+  upsampled nearest-neighbour (64-px blocks). Firefly clamp + bilinear upsampling → 32.6 dB.
+- Note: VM timing noise grew during C3/C4 (same binary: 28.3-33.2 ms baseline).
 
 ## Phase B optimisation rounds
 | round | change | baseline ms before → after | gain | fast ms before → after | gain |
@@ -130,4 +144,4 @@ Quality pass now renders the reference every frame so its caches stay in step.
 - **Phase B stopped after B7**: B5, B6, B7 each gained <10% (stop rule). Phase B total:
   baseline 44.57 → 18.91 ms (2.36x), fast 13.38 → 6.48 ms (2.06x).
   Remaining profile (baseline): tile shading ~8 ms, visibility raster ~4.5 ms, shadow passes 4.4, setup 1.7.
-- Phase C: C4 bloom; C5 TAA (tone mapping done in C1).
+- Phase C: C5 TAA (tone mapping done in C1).
