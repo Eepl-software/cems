@@ -294,14 +294,15 @@ inline vi shadeGroup(vi ids, vf x, vf y, const ShadeCtx& s, const AttrOf& attrOf
   const vf Lx = set1(s.L[0]), Ly = set1(s.L[1]), Lz = set1(s.L[2]);
   const vf ndl = max(fma(nx, Lx, fma(ny, Ly, nz * Lz)), zerof());
   vf lit = set1(1.0f);
-  if (s.shadow) lit = s.shadow->sample(WX, WY, WZ, W, ndl);
+  // Shadow lookups only matter where the sun can reach the surface.
+  if (s.shadow && bits(andnot(sky, ndl > zerof()))) lit = s.shadow->sample(WX, WY, WZ, W, ndl);
   const vf vx = set1(s.cam[0]) - WX, vy = set1(s.cam[1]) - WY, vz = set1(s.cam[2]) - WZ;
   const vf rv = rsqrt_fast(fma(vx, vx, fma(vy, vy, vz * vz)));
   const vf hx = fma(vx, rv, Lx), hy = fma(vy, rv, Ly), hz = fma(vz, rv, Lz);
   const vf rh = rsqrt_fast(fma(hx, hx, fma(hy, hy, hz * hz)));
   vf ndh = max(fma(nx, hx, fma(ny, hy, nz * hz)) * rh, zerof());
   ndh = ndh * ndh; ndh = ndh * ndh; ndh = ndh * ndh; ndh = ndh * ndh; ndh = ndh * ndh;  // ^32
-  const vf sp = ndh * lit * gatherf(s.matSpec, MAT) * set1(255.0f);
+  const vf sp = maskf(ndl > zerof(), ndh * lit * gatherf(s.matSpec, MAT) * set1(255.0f));
   const vf direct = ndl * lit;
   const vf amb = fma(ny, set1(0.08f), set1(0.16f));
   const vf tr = gatherf(s.matR, MAT), tg = gatherf(s.matG, MAT), tb = gatherf(s.matB, MAT);

@@ -285,6 +285,9 @@ inline vm operator~(vm a) { return andnot(a, alltrue()); }
 // Lane-wise 32-bit loads from base[idx] (manual "gather": faster than vpgather
 // on many x86 parts and the only option on NEON).
 inline vi gather(const void* base, vi idx) {
+#if defined(JSNOW_SIMD_AVX2) && defined(JSNOW_HW_GATHER)
+  return {_mm256_i32gather_epi32(static_cast<const int*>(base), idx.v, 4)};
+#endif
   alignas(32) int32_t i[8], r[8];
   lanes(idx, i);
   const int32_t* b = static_cast<const int32_t*>(base);

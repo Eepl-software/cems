@@ -9,6 +9,7 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
+option(JSNOW_HW_GATHER "Use AVX2 vpgatherdd (fast unless the CPU has the Gather Data Sampling microcode mitigation)" ON)
 option(JSNOW_NATIVE "Compile for the host CPU (-march=native) instead of plain AVX2+FMA" OFF)
 
 add_executable(jsnow
@@ -20,6 +21,10 @@ add_executable(jsnow
   src/raster.cpp
   src/post.cpp
   src/png.cpp)
+
+if(JSNOW_HW_GATHER)
+  target_compile_definitions(jsnow PRIVATE JSNOW_HW_GATHER=1)
+endif()
 
 find_package(Threads REQUIRED)
 target_link_libraries(jsnow PRIVATE Threads::Threads)
