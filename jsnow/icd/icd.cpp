@@ -666,7 +666,7 @@ static VkResult fillArray(uint32_t* count, T* out, const T* src, uint32_t n) {
 VKAPI VkResult VKAPI_CALL jsnow_EnumerateInstanceExtensionProperties(const char*, uint32_t* c, VkExtensionProperties* p) {
   return fillArray(c, p, kInstanceExts, 2);
 }
-VKAPI VkResult VKAPI_CALL jsnow_EnumerateInstanceVersion(uint32_t* v) { *v = VK_API_VERSION_1_0; return VK_SUCCESS; }
+VKAPI VkResult VKAPI_CALL jsnow_EnumerateInstanceVersion(uint32_t* v) { *v = VK_API_VERSION_1_1; return VK_SUCCESS; }
 VKAPI VkResult VKAPI_CALL jsnow_CreateInstance(const VkInstanceCreateInfo*, const VkAllocationCallbacks*, VkInstance* out) {
   auto* inst = new Instance();
   set_loader_magic_value(inst);
@@ -687,7 +687,7 @@ VKAPI VkResult VKAPI_CALL jsnow_EnumeratePhysicalDevices(VkInstance i, uint32_t*
 }
 VKAPI void VKAPI_CALL jsnow_GetPhysicalDeviceProperties(VkPhysicalDevice, VkPhysicalDeviceProperties* p) {
   std::memset(p, 0, sizeof *p);
-  p->apiVersion = VK_API_VERSION_1_0;
+  p->apiVersion = VK_API_VERSION_1_1;
   p->driverVersion = 1;
   p->vendorID = 0x10005;  // VK_VENDOR_ID_MESA-like placeholder
   p->deviceID = 1;
@@ -1398,6 +1398,143 @@ VKAPI VkResult VKAPI_CALL jsnow_QueuePresentKHR(VkQueue, const VkPresentInfoKHR*
   return VK_SUCCESS;
 }
 
+// --- Vulkan 1.1 core (and the matching KHR aliases) ---
+VKAPI void VKAPI_CALL jsnow_GetPhysicalDeviceFeatures2(VkPhysicalDevice pd, VkPhysicalDeviceFeatures2* f) {
+  jsnow_GetPhysicalDeviceFeatures(pd, &f->features);
+  for (auto* n = static_cast<VkBaseOutStructure*>(f->pNext); n; n = n->pNext) {
+    if (n->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES) {
+      auto* v = reinterpret_cast<VkPhysicalDeviceVulkan11Features*>(n);
+      void* next = v->pNext;
+      std::memset(v, 0, sizeof *v);
+      v->sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+      v->pNext = next;
+    }
+    // Other feature structs are left as zero-initialised by the app (= unsupported).
+  }
+}
+VKAPI void VKAPI_CALL jsnow_GetPhysicalDeviceProperties2(VkPhysicalDevice pd, VkPhysicalDeviceProperties2* p) {
+  jsnow_GetPhysicalDeviceProperties(pd, &p->properties);
+  for (auto* n = static_cast<VkBaseOutStructure*>(p->pNext); n; n = n->pNext) {
+    switch (n->sType) {
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES: {
+        auto* s2 = reinterpret_cast<VkPhysicalDeviceSubgroupProperties*>(n);
+        s2->subgroupSize = 1;
+        s2->supportedStages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        s2->supportedOperations = VK_SUBGROUP_FEATURE_BASIC_BIT;
+        s2->quadOperationsInAllStages = VK_FALSE;
+        break;
+      }
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES: {
+        auto* m3 = reinterpret_cast<VkPhysicalDeviceMaintenance3Properties*>(n);
+        m3->maxPerSetDescriptors = 1024;
+        m3->maxMemoryAllocationSize = VkDeviceSize(1) << 31;
+        break;
+      }
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES: {
+        auto* id = reinterpret_cast<VkPhysicalDeviceIDProperties*>(n);
+        std::memset(id->deviceUUID, 0x4A, VK_UUID_SIZE);
+        std::memset(id->driverUUID, 0x53, VK_UUID_SIZE);
+        id->deviceLUIDValid = VK_FALSE;
+        break;
+      }
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_POINT_CLIPPING_PROPERTIES:
+        reinterpret_cast<VkPhysicalDevicePointClippingProperties*>(n)->pointClippingBehavior =
+            VK_POINT_CLIPPING_BEHAVIOR_ALL_CLIP_PLANES;
+        break;
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_PROPERTIES: {
+        auto* mv = reinterpret_cast<VkPhysicalDeviceMultiviewProperties*>(n);
+        mv->maxMultiviewViewCount = 1;
+        mv->maxMultiviewInstanceIndex = 0;
+        break;
+      }
+      default: break;
+    }
+  }
+}
+VKAPI void VKAPI_CALL jsnow_GetPhysicalDeviceFormatProperties2(VkPhysicalDevice pd, VkFormat f, VkFormatProperties2* p) {
+  jsnow_GetPhysicalDeviceFormatProperties(pd, f, &p->formatProperties);
+}
+VKAPI VkResult VKAPI_CALL jsnow_GetPhysicalDeviceImageFormatProperties2(VkPhysicalDevice pd, const VkPhysicalDeviceImageFormatInfo2* i, VkImageFormatProperties2* p) {
+  return jsnow_GetPhysicalDeviceImageFormatProperties(pd, i->format, i->type, i->tiling, i->usage, i->flags, &p->imageFormatProperties);
+}
+VKAPI void VKAPI_CALL jsnow_GetPhysicalDeviceQueueFamilyProperties2(VkPhysicalDevice pd, uint32_t* c, VkQueueFamilyProperties2* p) {
+  if (!p) { *c = 1; return; }
+  if (*c >= 1) { uint32_t one = 1; jsnow_GetPhysicalDeviceQueueFamilyProperties(pd, &one, &p[0].queueFamilyProperties); *c = 1; }
+}
+VKAPI void VKAPI_CALL jsnow_GetPhysicalDeviceMemoryProperties2(VkPhysicalDevice pd, VkPhysicalDeviceMemoryProperties2* p) {
+  jsnow_GetPhysicalDeviceMemoryProperties(pd, &p->memoryProperties);
+}
+VKAPI void VKAPI_CALL jsnow_GetPhysicalDeviceSparseImageFormatProperties2(VkPhysicalDevice, const VkPhysicalDeviceSparseImageFormatInfo2*, uint32_t* c, VkSparseImageFormatProperties2*) { *c = 0; }
+static void dedicated(void* pNext) {
+  for (auto* n = static_cast<VkBaseOutStructure*>(pNext); n; n = n->pNext)
+    if (n->sType == VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS) {
+      auto* d = reinterpret_cast<VkMemoryDedicatedRequirements*>(n);
+      d->prefersDedicatedAllocation = d->requiresDedicatedAllocation = VK_FALSE;
+    }
+}
+VKAPI void VKAPI_CALL jsnow_GetBufferMemoryRequirements2(VkDevice d, const VkBufferMemoryRequirementsInfo2* i, VkMemoryRequirements2* r) {
+  jsnow_GetBufferMemoryRequirements(d, i->buffer, &r->memoryRequirements);
+  dedicated(r->pNext);
+}
+VKAPI void VKAPI_CALL jsnow_GetImageMemoryRequirements2(VkDevice d, const VkImageMemoryRequirementsInfo2* i, VkMemoryRequirements2* r) {
+  jsnow_GetImageMemoryRequirements(d, i->image, &r->memoryRequirements);
+  dedicated(r->pNext);
+}
+VKAPI void VKAPI_CALL jsnow_GetImageSparseMemoryRequirements2(VkDevice, const VkImageSparseMemoryRequirementsInfo2*, uint32_t* c, VkSparseImageMemoryRequirements2*) { *c = 0; }
+VKAPI VkResult VKAPI_CALL jsnow_BindBufferMemory2(VkDevice d, uint32_t n, const VkBindBufferMemoryInfo* b) {
+  for (uint32_t i = 0; i < n; ++i) jsnow_BindBufferMemory(d, b[i].buffer, b[i].memory, b[i].memoryOffset);
+  return VK_SUCCESS;
+}
+VKAPI VkResult VKAPI_CALL jsnow_BindImageMemory2(VkDevice d, uint32_t n, const VkBindImageMemoryInfo* b) {
+  for (uint32_t i = 0; i < n; ++i) jsnow_BindImageMemory(d, b[i].image, b[i].memory, b[i].memoryOffset);
+  return VK_SUCCESS;
+}
+VKAPI void VKAPI_CALL jsnow_GetDeviceQueue2(VkDevice d, const VkDeviceQueueInfo2*, VkQueue* q) { *q = from<VkQueue>(to<Device>(d)->queue); }
+VKAPI void VKAPI_CALL jsnow_TrimCommandPool(VkDevice, VkCommandPool, VkCommandPoolTrimFlags) {}
+VKAPI VkResult VKAPI_CALL jsnow_EnumeratePhysicalDeviceGroups(VkInstance i, uint32_t* c, VkPhysicalDeviceGroupProperties* p) {
+  if (!p) { *c = 1; return VK_SUCCESS; }
+  if (*c < 1) return VK_INCOMPLETE;
+  p[0].physicalDeviceCount = 1;
+  p[0].physicalDevices[0] = from<VkPhysicalDevice>(to<Instance>(i)->pd);
+  p[0].subsetAllocation = VK_FALSE;
+  *c = 1;
+  return VK_SUCCESS;
+}
+VKAPI void VKAPI_CALL jsnow_GetDeviceGroupPeerMemoryFeatures(VkDevice, uint32_t, uint32_t, uint32_t, VkPeerMemoryFeatureFlags* f) {
+  *f = VK_PEER_MEMORY_FEATURE_COPY_SRC_BIT | VK_PEER_MEMORY_FEATURE_COPY_DST_BIT;
+}
+VKAPI void VKAPI_CALL jsnow_CmdSetDeviceMask(VkCommandBuffer, uint32_t) {}
+VKAPI void VKAPI_CALL jsnow_GetDescriptorSetLayoutSupport(VkDevice, const VkDescriptorSetLayoutCreateInfo*, VkDescriptorSetLayoutSupport* s) { s->supported = VK_TRUE; }
+VKAPI void VKAPI_CALL jsnow_GetPhysicalDeviceExternalBufferProperties(VkPhysicalDevice, const VkPhysicalDeviceExternalBufferInfo*, VkExternalBufferProperties* p) {
+  std::memset(&p->externalMemoryProperties, 0, sizeof p->externalMemoryProperties);
+}
+VKAPI void VKAPI_CALL jsnow_GetPhysicalDeviceExternalFenceProperties(VkPhysicalDevice, const VkPhysicalDeviceExternalFenceInfo*, VkExternalFenceProperties* p) {
+  p->exportFromImportedHandleTypes = p->compatibleHandleTypes = 0; p->externalFenceFeatures = 0;
+}
+VKAPI void VKAPI_CALL jsnow_GetPhysicalDeviceExternalSemaphoreProperties(VkPhysicalDevice, const VkPhysicalDeviceExternalSemaphoreInfo*, VkExternalSemaphoreProperties* p) {
+  p->exportFromImportedHandleTypes = p->compatibleHandleTypes = 0; p->externalSemaphoreFeatures = 0;
+}
+struct UpdateTemplate { std::vector<VkDescriptorUpdateTemplateEntry> entries; };
+VKAPI VkResult VKAPI_CALL jsnow_CreateDescriptorUpdateTemplate(VkDevice, const VkDescriptorUpdateTemplateCreateInfo* ci, const VkAllocationCallbacks*, VkDescriptorUpdateTemplate* out) {
+  auto* t = new UpdateTemplate();
+  t->entries.assign(ci->pDescriptorUpdateEntries, ci->pDescriptorUpdateEntries + ci->descriptorUpdateEntryCount);
+  *out = from<VkDescriptorUpdateTemplate>(t);
+  return VK_SUCCESS;
+}
+VKAPI void VKAPI_CALL jsnow_DestroyDescriptorUpdateTemplate(VkDevice, VkDescriptorUpdateTemplate t, const VkAllocationCallbacks*) { delete to<UpdateTemplate>(t); }
+VKAPI void VKAPI_CALL jsnow_UpdateDescriptorSetWithTemplate(VkDevice d, VkDescriptorSet set, VkDescriptorUpdateTemplate t, const void* data) {
+  for (auto& e : to<UpdateTemplate>(t)->entries)
+    for (uint32_t k = 0; k < e.descriptorCount; ++k) {
+      const uint8_t* src = static_cast<const uint8_t*>(data) + e.offset + k * e.stride;
+      VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+      w.dstSet = set; w.dstBinding = e.dstBinding; w.dstArrayElement = e.dstArrayElement + k;
+      w.descriptorCount = 1; w.descriptorType = e.descriptorType;
+      w.pBufferInfo = reinterpret_cast<const VkDescriptorBufferInfo*>(src);
+      w.pImageInfo = reinterpret_cast<const VkDescriptorImageInfo*>(src);
+      jsnow_UpdateDescriptorSets(d, 1, &w, 0, nullptr);
+    }
+}
+
 // --- dispatch ---
 static PFN_vkVoidFunction lookup(const char* name);
 VKAPI PFN_vkVoidFunction VKAPI_CALL jsnow_GetInstanceProcAddr(VkInstance, const char* name) { return lookup(name); }
@@ -1435,10 +1572,25 @@ static PFN_vkVoidFunction lookup(const char* name) {
       E(GetPhysicalDeviceSurfaceSupportKHR), E(GetPhysicalDeviceSurfaceCapabilitiesKHR),
       E(GetPhysicalDeviceSurfaceFormatsKHR), E(GetPhysicalDeviceSurfacePresentModesKHR),
       E(GetPhysicalDeviceXcbPresentationSupportKHR), E(CreateSwapchainKHR), E(DestroySwapchainKHR),
-      E(GetSwapchainImagesKHR), E(AcquireNextImageKHR), E(QueuePresentKHR)};
+      E(GetSwapchainImagesKHR), E(AcquireNextImageKHR), E(QueuePresentKHR),
+      E(GetPhysicalDeviceFeatures2), E(GetPhysicalDeviceProperties2), E(GetPhysicalDeviceFormatProperties2),
+      E(GetPhysicalDeviceImageFormatProperties2), E(GetPhysicalDeviceQueueFamilyProperties2),
+      E(GetPhysicalDeviceMemoryProperties2), E(GetPhysicalDeviceSparseImageFormatProperties2),
+      E(GetBufferMemoryRequirements2), E(GetImageMemoryRequirements2), E(GetImageSparseMemoryRequirements2),
+      E(BindBufferMemory2), E(BindImageMemory2), E(GetDeviceQueue2), E(TrimCommandPool),
+      E(EnumeratePhysicalDeviceGroups), E(GetDeviceGroupPeerMemoryFeatures), E(CmdSetDeviceMask),
+      E(GetDescriptorSetLayoutSupport), E(GetPhysicalDeviceExternalBufferProperties),
+      E(GetPhysicalDeviceExternalFenceProperties), E(GetPhysicalDeviceExternalSemaphoreProperties),
+      E(CreateDescriptorUpdateTemplate), E(DestroyDescriptorUpdateTemplate), E(UpdateDescriptorSetWithTemplate)};
 #undef E
   auto it = table.find(name);
   if (it != table.end()) return it->second;
+  // KHR aliases of promoted 1.1 functions.
+  std::string n(name);
+  if (n.size() > 3 && n.compare(n.size() - 3, 3, "KHR") == 0) {
+    it = table.find(n.substr(0, n.size() - 3));
+    if (it != table.end()) return it->second;
+  }
   if (std::getenv("JSNOW_ICD_VERBOSE")) std::fprintf(stderr, "[jsnow-icd] no entry point %s\n", name);
   return nullptr;
 }

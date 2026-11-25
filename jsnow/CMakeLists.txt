@@ -58,5 +58,5 @@ if(JSNOW_BUILD_ICD AND VULKAN_ICD_HEADER AND XCB_LIB)
   target_link_libraries(jsnow_icd PRIVATE ${XCB_LIB} Threads::Threads)
   set_target_properties(jsnow_icd PROPERTIES PREFIX "lib")
   file(GENERATE OUTPUT ${CMAKE_BINARY_DIR}/jsnow_icd.json CONTENT
-"{\n  \"file_format_version\": \"1.0.0\",\n  \"ICD\": {\n    \"library_path\": \"$<TARGET_FILE:jsnow_icd>\",\n    \"api_version\": \"1.0.0\"\n  }\n}\n")
+"{\n  \"file_format_version\": \"1.0.0\",\n  \"ICD\": {\n    \"library_path\": \"$<TARGET_FILE:jsnow_icd>\",\n    \"api_version\": \"1.1.0\"\n  }\n}\n")
 endif()
