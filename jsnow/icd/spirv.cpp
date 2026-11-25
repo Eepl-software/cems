@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <ucontext.h>
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -413,39 +415,146 @@ void Invocation::resetStorage() {
     }
 }
 
+bool Invocation::jitReady(bool wait) {
+  if (!jitEnabled()) return false;
+  Module::JitSlot& js = m_.jit;
+  int st = js.state.load(std::memory_order_acquire);
+  if (st == 0) {
+    // First thread compiles; unless `wait`, the others keep interpreting meanwhile.
+    std::unique_lock<std::mutex> lk(js.mu, std::defer_lock);
+    if (wait) lk.lock(); else (void)lk.try_lock();
+    if (lk.owns_lock() && js.state.load() == 0) {
+      std::string err;
+      js.fn = reinterpret_cast<void*>(jit::compile(m_, err, &js.sharedWords));
+      if (jitVerbose() || !js.fn)
+        std::fprintf(stderr, "[jsnow-jit] %s shader (model %d): %s\n", js.fn ? "compiled" : "interpreting",
+                     m_.executionModel, js.fn ? "ok" : err.c_str());
+      js.state.store(js.fn ? 1 : 2, std::memory_order_release);
+    }
+    st = js.state.load(std::memory_order_acquire);
+  }
+  return st == 1;
+}
+
+void Invocation::prepareJit(const Resources& res, uint8_t activeMask, jsnow_jit::Ctx& ctx) {
+  resetStorage();
+  killed_ = 0;
+  ctx.storage = storagePtr_.data();
+  ctx.res = &res;
+  ctx.rt = jit::runtime();
+  ctx.push = res.pushConstants;
+  ctx.fragX = fragX;
+  ctx.fragY = fragY;
+  ctx.active = activeMask;
+  ctx.killed = 0;
+  ctx.shared = nullptr;
+  ctx.barrier = nullptr;
+  ctx.user = nullptr;
+}
+
+namespace {
+struct Fiber {
+  ucontext_t uc;
+  ucontext_t* sched = nullptr;
+  std::unique_ptr<char[]> stack;
+  jsnow_jit::Ctx ctx;
+  jsnow_jit::ShaderFn fn = nullptr;
+  bool done = false;
+};
+constexpr size_t kFiberStack = 1 << 20;
+thread_local Fiber* tlFiber = nullptr;
+void fiberEntry() { Fiber* f = tlFiber; f->fn(&f->ctx); f->done = true; }
+void fiberYield(jsnow_jit::Ctx* c) {
+  Fiber* f = static_cast<Fiber*>(c->user);
+  swapcontext(&f->uc, f->sched);
+}
+}  // namespace
+
+bool runWorkgroup(Invocation* const* invs, const uint8_t* masks, int n, const Resources& res) {
+  if (n <= 0 || !invs[0]->jitReady(true)) return false;
+  const Module::JitSlot& js = invs[0]->module().jit;
+  static thread_local std::vector<uint32_t> shared;
+  static thread_local std::vector<std::unique_ptr<Fiber>> fibers;
+  static thread_local ucontext_t sched;
+  shared.assign(size_t(std::max(1, js.sharedWords)), 0);
+  const auto fn = reinterpret_cast<jsnow_jit::ShaderFn>(js.fn);
+  if (n == 1) {
+    jsnow_jit::Ctx ctx;
+    invs[0]->prepareJit(res, masks[0], ctx);
+    ctx.shared = shared.data();
+    fn(&ctx);
+    return true;
+  }
+  while (int(fibers.size()) < n) {
+    fibers.push_back(std::make_unique<Fiber>());
+    fibers.back()->stack.reset(new char[kFiberStack]);
+  }
+  for (int i = 0; i < n; ++i) {
+    Fiber& f = *fibers[size_t(i)];
+    invs[i]->prepareJit(res, masks[i], f.ctx);
+    f.ctx.shared = shared.data();
+    f.ctx.barrier = fiberYield;
+    f.ctx.user = &f;
+    f.fn = fn;
+    f.done = false;
+    f.sched = &sched;
+    getcontext(&f.uc);
+    f.uc.uc_stack.ss_sp = f.stack.get();
+    f.uc.uc_stack.ss_size = kFiberStack;
+    f.uc.uc_link = &sched;
+    makecontext(&f.uc, fiberEntry, 0);
+  }
+  // Round robin: every batch runs up to its next barrier, then the next batch runs.
+  for (int remaining = n; remaining > 0;) {
+    remaining = 0;
+    for (int i = 0; i < n; ++i) {
+      Fiber& f = *fibers[size_t(i)];
+      if (f.done) continue;
+      tlFiber = &f;
+      swapcontext(&sched, &f.uc);
+      if (!f.done) ++remaining;
+    }
+  }
+  return true;
+}
+
+Module::Serial::Serial() {
+  static std::atomic<uint64_t> next{1};
+  v = next.fetch_add(1);
+}
+
+Invocation& threadInvocation(const Module& m, int slot) {
+  struct Entry { const Module* m; std::unique_ptr<Invocation> inv; };
+  static thread_local std::unordered_map<uint64_t, Entry> cache;
+  const uint64_t key = m.serial.v * 128 + uint64_t(slot);
+  auto it = cache.find(key);
+  if (it != cache.end() && it->second.m == &m) return *it->second.inv;
+  if (cache.size() > 512) cache.clear();  // modules come and go; bound the memory
+  Entry& e = cache[key];
+  e.m = &m;
+  e.inv = std::make_unique<Invocation>(m);
+  return *e.inv;
+}
+
+bool Module::usesWorkgroupMemory() const {
+  for (uint32_t id = 0; id < bound; ++id)
+    if (isVar[id] && vars[id].storage == 4) return true;
+  for (const Inst& in : insts)
+    if (in.op == OpControlBarrier) return true;
+  return false;
+}
+
 void Invocation::run(const Resources& res, uint8_t activeMask) {
   killed_ = 0;
   resetStorage();
-  if (jitEnabled()) {
-    Module::JitSlot& js = m_.jit;
-    int st = js.state.load(std::memory_order_acquire);
-    if (st == 0) {
-      // First thread compiles; the others keep interpreting meanwhile.
-      std::unique_lock<std::mutex> lk(js.mu, std::try_to_lock);
-      if (lk.owns_lock() && js.state.load() == 0) {
-        std::string err;
-        js.fn = reinterpret_cast<void*>(jit::compile(m_, err));
-        if (jitVerbose() || !js.fn)
-          std::fprintf(stderr, "[jsnow-jit] %s shader (model %d): %s\n", js.fn ? "compiled" : "interpreting",
-                       m_.executionModel, js.fn ? "ok" : err.c_str());
-        js.state.store(js.fn ? 1 : 2, std::memory_order_release);
-        st = js.state.load();
-      }
-    }
-    if (st == 1) {
-      jsnow_jit::Ctx ctx;
-      ctx.storage = storagePtr_.data();
-      ctx.res = &res;
-      ctx.rt = jit::runtime();
-      ctx.push = res.pushConstants;
-      ctx.fragX = fragX;
-      ctx.fragY = fragY;
-      ctx.active = activeMask;
-      ctx.killed = 0;
-      reinterpret_cast<jsnow_jit::ShaderFn>(js.fn)(&ctx);
-      killed_ = uint8_t(ctx.killed & activeMask);
-      return;
-    }
+  if (jitReady(false)) {
+    jsnow_jit::Ctx ctx;
+    prepareJit(res, activeMask, ctx);
+    static thread_local std::vector<uint32_t> shared;
+    if (m_.jit.sharedWords) { shared.assign(size_t(m_.jit.sharedWords), 0); ctx.shared = shared.data(); }
+    reinterpret_cast<jsnow_jit::ShaderFn>(m_.jit.fn)(&ctx);
+    killed_ = uint8_t(ctx.killed & activeMask);
+    return;
   }
   if (exec(res, activeMask, false, 0)) return;
   if (!error.empty()) return;
@@ -485,6 +594,13 @@ void layout(const Module& m, uint32_t type, uint32_t base, uint32_t matrixStride
       out.push_back(base);
       break;
   }
+}
+
+inline int wrapCoord(int i, int n, int mode) {
+  if (mode == 2) return std::clamp(i, 0, n - 1);
+  if (mode == 1) { const int p = ((i % (2 * n)) + 2 * n) % (2 * n); return p < n ? p : 2 * n - 1 - p; }
+  if ((n & (n - 1)) == 0) return i & (n - 1);
+  return ((i % n) + n) % n;
 }
 
 float sampleTexture(const Texture& tx, float s, float t, float lod, int ch) {
@@ -626,6 +742,40 @@ void sample8(const Texture* tx, const uint32_t* c, const float* lod, uint32_t* o
       const float rho = std::max(dsx * dsx + dtx * dtx, dsy * dsy + dty * dty);
       lodv[l] = 0.5f * std::log2(std::max(rho, 1e-12f));
     }
+  }
+  if (tx && (tx->format == 0 || tx->format == 1)) {  // RGBA8 / BGRA8: all four channels per texel fetch
+    const int sw = tx->format == 1 ? 2 : 0;          // BGRA: swap R and B
+    for (int l = 0; l < L; ++l) {
+      const int level = std::clamp(int(std::floor(lodv[l] + 0.5f)), 0, tx->levels - 1);
+      const int w = std::max(1, tx->width >> level), h = std::max(1, tx->height >> level);
+      const uint8_t* base = tx->data + tx->levelOffset[level];
+      const int pitch = tx->levelPitch[level];
+      const float s = f(c[l]), t = f(c[L + l]);
+      float r[4];
+      if (!tx->linear) {
+        const int x = wrapCoord(int(std::floor(s * w)), w, tx->addressU), y = wrapCoord(int(std::floor(t * h)), h, tx->addressV);
+        const uint8_t* p = base + size_t(y) * pitch + size_t(x) * 4;
+        for (int ch = 0; ch < 4; ++ch) r[ch] = p[ch] * (1.0f / 255.0f);
+      } else {
+        const float x = s * w - 0.5f, y = t * h - 0.5f;
+        const float fx = std::floor(x), fy = std::floor(y);
+        const int x0 = int(fx), y0 = int(fy);
+        const float ax = x - fx, ay = y - fy;
+        const int xa = wrapCoord(x0, w, tx->addressU), xb = wrapCoord(x0 + 1, w, tx->addressU);
+        const int ya = wrapCoord(y0, h, tx->addressV), yb = wrapCoord(y0 + 1, h, tx->addressV);
+        const uint8_t* ra = base + size_t(ya) * pitch;
+        const uint8_t* rb = base + size_t(yb) * pitch;
+        const uint8_t *pa = ra + xa * 4, *pb = ra + xb * 4, *pc = rb + xa * 4, *pd = rb + xb * 4;
+        for (int ch = 0; ch < 4; ++ch) {
+          const float A = pa[ch] * (1.0f / 255.0f), B = pb[ch] * (1.0f / 255.0f);
+          const float C = pc[ch] * (1.0f / 255.0f), D = pd[ch] * (1.0f / 255.0f);
+          const float top = A + (B - A) * ax, bot = C + (D - C) * ax;
+          r[ch] = top + (bot - top) * ay;
+        }
+      }
+      out[l] = u(r[sw]); out[L + l] = u(r[1]); out[2 * L + l] = u(r[2 - sw]); out[3 * L + l] = u(r[3]);
+    }
+    return;
   }
   for (int l = 0; l < L; ++l)
     for (int ch = 0; ch < 4; ++ch)

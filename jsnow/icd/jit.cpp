@@ -74,7 +74,7 @@ struct Unsupported : std::runtime_error {
 
 struct Ptr {
   uint32_t var = 0, type = 0;
-  int kind = 0;  // 0 storage (ctx), 1 function-local, 2 buffer, 3 push constant, 4 image var
+  int kind = 0;  // 0 storage (ctx), 1 function-local, 2 buffer, 3 push constant, 4 image var, 5 workgroup
   int off = 0;   // components (0/1) or bytes (2/3)
   std::string dyn;  // name of a vi with per-lane extra offset ("" = none)
   uint32_t matrixStride = 16;
@@ -112,12 +112,39 @@ class Gen {
     o << "  vm M = alive;\n";
     emitFunctionBody(uint32_t(fn), "");
     std::ostringstream out;
-    out << "#include \"simd.hpp\"\n#include \"jit_rt.hpp\"\n#include <cmath>\n#include <cstring>\n"
+    out << "// jsnow-jit v2\n#include \"simd.hpp\"\n#include \"jit_rt.hpp\"\n#include <cmath>\n#include <cstring>\n"
            "using namespace jsnow::simd;\nusing jsnow_jit::Ctx;\n"
            "static inline float bf(int32_t i){float f;std::memcpy(&f,&i,4);return f;}\n"
            "static inline int32_t bi(float f){int32_t i;std::memcpy(&i,&f,4);return i;}\n"
            "static inline vf F(vi a){return as_f(a);}\nstatic inline vi I(vf a){return as_i(a);}\n"
            "static inline vi B(vm a){return as_i(a);}\n"
+           "static inline float h2f(uint16_t h){const uint32_t s=(h>>15)&1,e=(h>>10)&31,m=h&1023;"
+           "const float r=e==0?std::ldexp(float(m),-24):e==31?(m?NAN:INFINITY):std::ldexp(float(m|1024),int(e)-25);return s?-r:r;}\n"
+           "static inline uint16_t f2h(float fv){uint32_t x;std::memcpy(&x,&fv,4);const uint32_t s=(x>>16)&0x8000;"
+           "int e=int((x>>23)&0xFF)-112;uint32_t m=x&0x7FFFFF;if(e>=31)return uint16_t(s|0x7C00);"
+           "if(e<=0){if(e<-10)return uint16_t(s);m|=0x800000;return uint16_t(s|(m>>(14-e)));}return uint16_t(s|(e<<10)|(m>>13));}\n"
+           "static inline vf vexp2(vf x){x=min(max(x,set1(-126.0f)),set1(127.0f));const vf fl=floor(x),f=x-fl;"
+           "vf p=set1(2.1877504800620255e-4f);p=fma(p,f,set1(1.2387821470281233e-3f));p=fma(p,f,set1(9.684580453225029e-3f));"
+           "p=fma(p,f,set1(5.5480426325371895e-2f));p=fma(p,f,set1(0.24023050204507418f));p=fma(p,f,set1(0.6931469286930243f));"
+           "p=fma(p,f,set1(1.0f));return p*as_f(shl<23>(trunc_i(fl)+set1i(127)));}\n"
+           "static inline vf vlog2(vf x){const vi xi=as_i(x);vi e=shrv(xi,set1i(23))-set1i(127);"
+           "vf m=as_f((xi&set1i(0x007FFFFF))|set1i(0x3F800000));const vm big=m>set1(1.41421356f);"
+           "m=select(big,m*set1(0.5f),m);e=selecti(big,e+set1i(1),e);const vf t=m-set1(1.0f);"
+           "vf p=set1(0.12614846751931225f);p=fma(p,t,set1(-0.2074210357364508f));p=fma(p,t,set1(0.21566985886542708f));"
+           "p=fma(p,t,set1(-0.23892033972478718f));p=fma(p,t,set1(0.2879183244709488f));p=fma(p,t,set1(-0.360704828100181f));"
+           "p=fma(p,t,set1(0.48091060994551826f));p=fma(p,t,set1(-0.72134733335986f));p=fma(p,t,set1(1.4426950037647246f));"
+           "vf r=fma(t,p,to_f(e));r=select(x>zerof(),r,select(x<zerof(),set1(NAN),set1(-INFINITY)));"
+           "return select(x>=x,select(x<set1(INFINITY),r,x),x);}\n"
+           "static inline vf vsinpoly(vf y){const vf z=y*y;vf p=set1(-2.390963162363843e-08f);p=fma(p,z,set1(2.752659747633789e-06f));"
+           "p=fma(p,z,set1(-1.9840892044801966e-4f));p=fma(p,z,set1(8.333331278561085e-3f));p=fma(p,z,set1(-0.16666666628270577f));"
+           "p=fma(p,z,set1(1.0f));return y*p;}\n"
+           "static inline vf vsin(vf x){const vf k=floor(fma(x,set1(0.31830988618f),set1(0.5f)));"
+           "const vf y=fma(k,set1(8.742277657e-8f),fma(k,set1(-3.14159274101f),x));"
+           "return as_f(as_i(vsinpoly(y))^shl<31>(trunc_i(k)));}\n"
+           "static inline vf vcos(vf x){const vf k=floor(x*set1(0.31830988618f));const vf kh=k+set1(0.5f);"
+           "const vf y=fma(kh,set1(8.742277657e-8f),fma(kh,set1(-3.14159274101f),x));"
+           "return as_f(as_i(vsinpoly(y))^shl<31>(trunc_i(k)+set1i(1)));}\n"
+           "static inline vf vpow(vf x,vf y){const vf r=vexp2(y*vlog2(x));return select((x>=zerof())&(x<=zerof()),select(y>zerof(),zerof(),select((y>=zerof())&(y<=zerof()),set1(1.0f),set1(INFINITY))),r);}\n"
            "static inline vi gatherS(const uint32_t* s, vi idx){return gather(s, shl<3>(idx) + iotai());}\n"
            "extern \"C\" __attribute__((visibility(\"default\"))) void jsnow_shader(Ctx* ctx) {\n"
            "  const vi LANE = iotai();\n"
@@ -126,6 +153,7 @@ class Gen {
            "  (void)LANE;\n";
     out << decl_.str() << body_.str();
     out << "  ctx->killed = uint32_t(bits(killedM));\n}\n";
+    out << "extern \"C\" __attribute__((visibility(\"default\"))) const int jsnow_shared_words = " << sharedWords_ << ";\n";
     return out.str();
   }
 
@@ -139,6 +167,7 @@ class Gen {
   std::map<uint32_t, uint32_t> imageVar_;  // value id -> image variable id
   std::set<uint32_t> buffersHoisted_;
   std::vector<LoopCtx> loops_;
+  uint32_t sharedWords_ = 0;
   int uniq_ = 0;
   int indent_ = 1;
   // function inlining
@@ -204,12 +233,21 @@ class Gen {
       case PushConstant: p.kind = 3; hoistBuffer(var); break;
       case UniformConstant: p.kind = 4; break;
       case Input: case Output: case Private: p.kind = 0; break;
+      case 4: {  // Workgroup: scalar words in ctx->shared
+        p.kind = 5;
+        p.off = int(sharedWords_);
+        sharedWords_ += std::max(1u, tcomps(var.type));
+        break;
+      }
       default: throw Unsupported("storage class " + std::to_string(var.storage));
     }
     ptr_[id] = p;
     return p;
   }
 
+  std::string sharedIdx(const Ptr& p, uint32_t k) {
+    return (p.dyn.empty() ? std::string("set1i(0)") : p.dyn) + " + set1i(" + std::to_string(p.off + int(k)) + ")";
+  }
   std::string storageExpr(const Ptr& p) {
     if (p.kind == 1) return "F" + std::to_string(p.var);
     return "ctx->storage[" + std::to_string(p.var) + "]";
@@ -222,6 +260,15 @@ class Gen {
     const bool isBool = isBoolType(p.type);
     if (p.kind == 4) { imageVar_[res] = p.var; return; }
     declare(res);
+    if (p.kind == 5) {
+      for (uint32_t k = 0; k < c; ++k) {
+        std::string e = p.dyn.empty() ? "set1i(int32_t(ctx->shared[" + std::to_string(p.off + int(k)) + "]))"
+                                      : "gather(ctx->shared, " + sharedIdx(p, k) + ")";
+        if (isBool) e = "B(~cmpeq(" + e + ", set1i(0)))";
+        o() << v(res, k) << " = " << e << ";\n";
+      }
+      return;
+    }
     if (p.kind == 0 || p.kind == 1) {
       const std::string S = storageExpr(p);
       for (uint32_t k = 0; k < c; ++k) {
@@ -254,6 +301,15 @@ class Gen {
     Ptr p = basePtr(ptrId);
     const uint32_t c = tcomps(p.type);
     const bool isBool = isBoolType(p.type);
+    if (p.kind == 5) {
+      for (uint32_t k = 0; k < c; ++k) {
+        std::string x = v(val, k);
+        if (isBool) x = "(" + x + " & set1i(1))";
+        o() << "{ alignas(32) int32_t ix[8], vv[8]; storei(ix, " << sharedIdx(p, k) << "); storei(vv, " << x
+            << "); const int mm = bits(M); for (int l = 0; l < 8; ++l) if (mm >> l & 1) ctx->shared[ix[l]] = uint32_t(vv[l]); }\n";
+      }
+      return;
+    }
     if (p.kind == 0 || p.kind == 1) {
       const std::string S = storageExpr(p);
       for (uint32_t k = 0; k < c; ++k) {
@@ -469,18 +525,18 @@ class Gen {
       case 1: case 2: scalarFn("std::nearbyint", 1); return;
       case 3: scalarFn("std::trunc", 1); return;
       case 6: perLane(res, {arg(0)}, "{ float X = bf(a0[l]); r = bi(X > 0 ? 1.0f : X < 0 ? -1.0f : 0.0f); }"); return;
-      case 13: scalarFn("std::sin", 1); return;
-      case 14: scalarFn("std::cos", 1); return;
+      case 13: F1("vsin($0)"); return;
+      case 14: F1("vcos($0)"); return;
       case 15: scalarFn("std::tan", 1); return;
       case 16: scalarFn("std::asin", 1); return;
       case 17: scalarFn("std::acos", 1); return;
       case 18: scalarFn("std::atan", 1); return;
       case 25: scalarFn("std::atan2", 2); return;
-      case 26: scalarFn("std::pow", 2); return;
-      case 27: scalarFn("std::exp", 1); return;
-      case 28: scalarFn("std::log", 1); return;
-      case 29: scalarFn("std::exp2", 1); return;
-      case 30: scalarFn("std::log2", 1); return;
+      case 26: F1("vpow($0, $1)"); return;
+      case 27: F1("vexp2($0 * set1(1.44269504089f))"); return;
+      case 28: F1("vlog2($0) * set1(0.69314718056f)"); return;
+      case 29: F1("vexp2($0)"); return;
+      case 30: F1("vlog2($0)"); return;
       case 5: perLane(res, {arg(0)}, "r = a0[l] < 0 ? -a0[l] : a0[l];"); return;
       case 38: perLane(res, {arg(0), arg(1)}, "r = int32_t(std::min(uint32_t(a0[l]), uint32_t(a1[l])));"); return;
       case 39: for (uint32_t k = 0; k < c; ++k) o() << v(res, k) << " = mini(" << vb(arg(0), k) << ", " << vb(arg(1), k) << ");\n"; return;
@@ -511,6 +567,51 @@ class Gen {
         const std::string n = fresh("nrm");
         o() << "const vf " << n << " = select(" << s << " > zerof(), set1(1.0f) / sqrt(" << s << "), zerof());\n";
         for (uint32_t k = 0; k < c; ++k) o() << v(res, k) << " = I(F(" << v(arg(0), k) << ") * " << n << ");\n";
+        return;
+      }
+      case 72: {  // Refract(I, N, eta)
+        std::string d = "zerof()";
+        for (uint32_t k = 0; k < c; ++k) d = "fma(F(" + v(arg(0), k) + "), F(" + v(arg(1), k) + "), " + d + ")";
+        const std::string n = fresh("rf");
+        o() << "const vf " << n << "d = " << d << ", " << n << "e = F(" << v(arg(2), 0) << ");\n";
+        o() << "const vf " << n << "k = set1(1.0f) - " << n << "e * " << n << "e * (set1(1.0f) - " << n << "d * " << n << "d);\n";
+        o() << "const vm " << n << "ok = " << n << "k >= zerof();\n";
+        o() << "const vf " << n << "s = " << n << "e * " << n << "d + sqrt(max(" << n << "k, zerof()));\n";
+        for (uint32_t k = 0; k < c; ++k)
+          o() << v(res, k) << " = I(select(" << n << "ok, " << n << "e * F(" << v(arg(0), k) << ") - " << n << "s * F("
+              << v(arg(1), k) << "), zerof()));\n";
+        return;
+      }
+      case 70: {  // FaceForward(N, I, Nref)
+        std::string d = "zerof()";
+        for (uint32_t k = 0; k < c; ++k) d = "fma(F(" + v(arg(2), k) + "), F(" + v(arg(1), k) + "), " + d + ")";
+        const std::string n = fresh("ff");
+        o() << "const vm " << n << " = " << d << " < zerof();\n";
+        for (uint32_t k = 0; k < c; ++k)
+          o() << v(res, k) << " = select" << "i(" << n << ", " << v(arg(0), k) << ", " << v(arg(0), k) << " ^ set1i(int32_t(0x80000000u)));\n";
+        return;
+      }
+      case 7: perLane(res, {arg(0)}, "r = a0[l] > 0 ? 1 : a0[l] < 0 ? -1 : 0;"); return;
+      case 47: for (uint32_t k = 0; k < c; ++k) o() << v(res, k) << " = selecti(as_m(" << vb(arg(2), k) << "), " << vb(arg(1), k) << ", " << vb(arg(0), k) << ");\n"; return;
+      case 53: perLane(res, {arg(0), arg(1)}, "r = bi(std::ldexp(bf(a0[l]), a1[l]));"); return;
+      case 58: {  // PackHalf2x16
+        declare(res);
+        o() << "{ alignas(32) int32_t x0[8], x1[8], rr[8]; storei(x0, " << v(arg(0), 0) << "); storei(x1, " << v(arg(0), 1)
+            << "); for (int l = 0; l < 8; ++l) rr[l] = int32_t(uint32_t(f2h(bf(x0[l]))) | uint32_t(f2h(bf(x1[l]))) << 16); "
+            << v(res, 0) << " = loadi(rr); }\n";
+        return;
+      }
+      case 62: {  // UnpackHalf2x16
+        declare(res);
+        o() << "{ alignas(32) int32_t x0[8], r0[8], r1[8]; storei(x0, " << v(arg(0), 0)
+            << "); for (int l = 0; l < 8; ++l) { r0[l] = bi(h2f(uint16_t(x0[l]))); r1[l] = bi(h2f(uint16_t(uint32_t(x0[l]) >> 16))); } "
+            << v(res, 0) << " = loadi(r0); " << v(res, 1) << " = loadi(r1); }\n";
+        return;
+      }
+      case 64: {  // UnpackUnorm4x8
+        declare(res);
+        for (uint32_t k = 0; k < 4; ++k)
+          o() << v(res, k) << " = I(to_f(shrv(" << v(arg(0), 0) << ", set1i(" << 8 * k << ")) & set1i(255)) * set1(1.0f / 255.0f));\n";
         return;
       }
       case 71: {  // Reflect
@@ -810,7 +911,8 @@ class Gen {
     const uint16_t op = m_.insts[i].op;
     const uint32_t* a = ops(i);
     switch (op) {
-      case OpNop: case OpLine: case OpNoLine: case OpVariable: case OpControlBarrier: case OpMemoryBarrier: return;
+      case OpNop: case OpLine: case OpNoLine: case OpVariable: case OpMemoryBarrier: return;
+      case OpControlBarrier: o() << "if (ctx->barrier) ctx->barrier(ctx);\n"; return;
       case OpLoad: emitLoad(a[1], a[2]); return;
       case OpStore: emitStore(a[0], a[1]); return;
       case OpAccessChain: case OpInBoundsAccessChain: emitAccessChain(i); return;
@@ -1025,15 +1127,17 @@ class Gen {
       case OpAtomicUMin: case OpAtomicSMax: case OpAtomicUMax: case OpAtomicAnd: case OpAtomicOr: case OpAtomicXor: {
         const bool isStore = op == OpAtomicStore;
         Ptr p = basePtr(isStore ? a[0] : a[2]);
-        if (p.kind != 2) throw Unsupported("atomic on non-buffer memory");
-        const std::string B = "B" + std::to_string(p.var);
+        if (p.kind != 2 && p.kind != 5) throw Unsupported("atomic on non-buffer memory");
+        const std::string B = p.kind == 5 ? std::string("reinterpret_cast<uint8_t*>(ctx->shared)") : "B" + std::to_string(p.var);
+        const std::string offE = p.kind == 5 ? "shl<2>(" + sharedIdx(p, 0) + ")"
+                                             : (p.dyn.empty() ? std::string("set1i(0)") : p.dyn) + " + set1i(" + std::to_string(p.off) + ")";
         std::string A = "set1i(0)", Bv = "set1i(0)";
         if (op == OpAtomicStore) A = v(a[3], 0);
         else if (op == OpAtomicCompareExchange) { A = v(a[6], 0); Bv = v(a[7], 0); }
         else if (op != OpAtomicLoad && op != OpAtomicIIncrement && op != OpAtomicIDecrement) A = v(a[5], 0);
         if (!isStore) declare(a[1]);
-        o() << "if (" << B << ") { alignas(32) int32_t ox[8], va[8], vb2[8], rr[8] = {}; storei(ox, "
-            << (p.dyn.empty() ? std::string("set1i(0)") : p.dyn) << " + set1i(" << p.off << ")); storei(va, " << A
+        o() << "if (" << B << ") { alignas(32) int32_t ox[8], va[8], vb2[8], rr[8] = {}; storei(ox, " << offE
+            << "); storei(va, " << A
             << "); storei(vb2, " << Bv << "); const int mm = bits(M); for (int l = 0; l < 8; ++l) if (mm >> l & 1) rr[l] = int32_t(ctx->rt->atomic("
             << op << ", reinterpret_cast<uint32_t*>(const_cast<uint8_t*>(" << B << ") + ox[l]), uint32_t(va[l]), uint32_t(vb2[l])));";
         if (!isStore) body_ << " " << v(a[1], 0) << " = loadi(rr);";
@@ -1096,7 +1200,7 @@ std::string generate(const spv::Module& m, std::string& err) {
   }
 }
 
-jsnow_jit::ShaderFn compile(const spv::Module& m, std::string& err) {
+jsnow_jit::ShaderFn compile(const spv::Module& m, std::string& err, int* sharedWords) {
   const std::string src = generate(m, err);
   if (src.empty()) return nullptr;
   const std::string dir = cacheDir();
@@ -1125,6 +1229,10 @@ jsnow_jit::ShaderFn compile(const spv::Module& m, std::string& err) {
   if (!h) { err = dlerror(); return nullptr; }
   auto fn = reinterpret_cast<jsnow_jit::ShaderFn>(dlsym(h, "jsnow_shader"));
   if (!fn) err = "symbol missing";
+  if (sharedWords) {
+    const int* sw = static_cast<const int*>(dlsym(h, "jsnow_shared_words"));
+    *sharedWords = sw ? *sw : 0;
+  }
   return fn;
 }
 

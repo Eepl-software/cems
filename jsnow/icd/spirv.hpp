@@ -11,6 +11,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "jit_rt.hpp"
+
 namespace spv {
 
 constexpr int L = 8;  // lanes
@@ -77,7 +79,12 @@ class Invocation {
   const float* output(uint32_t var) const { return reinterpret_cast<const float*>(storage_[var].data()); }
   void run(const Resources& res, uint8_t activeMask = 0xFF);
   uint8_t killed() const { return killed_; }
+  const Module& module() const { return m_; }
   int32_t fragX[8] = {}, fragY[8] = {};  // pixel of each lane (subpass inputs)
+  // JIT: compiles the module on first use (blocking if `wait`); true if native code is available.
+  bool jitReady(bool wait);
+  // Fills a JIT context for this invocation (resets private storage).
+  void prepareJit(const Resources& res, uint8_t activeMask, jsnow_jit::Ctx& ctx);
   std::string error;
 
  private:
@@ -136,20 +143,39 @@ class Module {
   // Applies VkSpecializationInfo-style entries (specId, byte offset, size) over `data`.
   void foldSpecOps();
   void specialize(const std::vector<std::array<uint32_t, 3>>& entries, const uint8_t* data);
+  bool usesWorkgroupMemory() const;  // Workgroup variables or OpControlBarrier
   // JIT state (not copied with the module: a specialized copy gets its own code).
   struct JitSlot {
     std::atomic<int> state{0};  // 0 not tried, 1 ready, 2 failed
     void* fn = nullptr;
+    int sharedWords = 0;
     std::mutex mu;
     JitSlot() = default;
     JitSlot(const JitSlot&) {}
     JitSlot& operator=(const JitSlot&) { return *this; }
   };
   mutable JitSlot jit;
+  // Unique id per module object (copies get a new one); keys per-thread caches.
+  struct Serial {
+    uint64_t v;
+    Serial();
+    Serial(const Serial&) : Serial() {}
+    Serial& operator=(const Serial&) { return *this; }
+  };
+  Serial serial;
 
  private:
   void computeComps(uint32_t id);
 };
+
+// Per-thread cached Invocation for `m` (slot: several per thread, e.g. compute batches).
+// Avoids re-allocating per-id storage for every draw.
+Invocation& threadInvocation(const Module& m, int slot = 0);
+
+// Runs one compute workgroup split into 8-lane batches (one Invocation per batch,
+// builtins already filled) with shared memory and barriers (batches are fibers that
+// switch at each barrier). Returns false if native code is unavailable.
+bool runWorkgroup(Invocation* const* invs, const uint8_t* masks, int n, const Resources& res);
 
 // Byte offsets of every flattened component of `type` inside a buffer.
 void bufferLayout(const Module& m, uint32_t type, uint32_t base, uint32_t matrixStride, bool rowMajor,

@@ -22,8 +22,15 @@
 #include <unordered_map>
 #include <vector>
 
+#include "../src/simd.hpp"
 #include "../src/threadpool.hpp"
 #include "spirv.hpp"
+
+static inline float halfToFloat(uint16_t h) {
+  const uint32_t sgn = (h >> 15) & 1, e = (h >> 10) & 31, mnt = h & 1023;
+  const float r = e == 0 ? std::ldexp(float(mnt), -24) : e == 31 ? (mnt ? NAN : INFINITY) : std::ldexp(float(mnt | 1024), int(e) - 25);
+  return sgn ? -r : r;
+}
 
 #define JSNOW_EXPORT extern "C" __attribute__((visibility("default")))
 
@@ -393,7 +400,7 @@ float blendFactor(VkBlendFactor f, const float s[4], const float d[4], int ch) {
 // One post-viewport vertex: screen x, y, z, 1/w and the varyings divided by w.
 struct SVert { float x, y, z, q; };
 
-void drawPrimitives(Exec& ex, const std::vector<uint32_t>& vertexIds, uint32_t instance);
+void drawPrimitives(Exec& ex, const std::vector<uint32_t>& vertexIds, uint32_t firstInstance, uint32_t instances);
 
 void cmdDraw(Exec& ex, uint32_t count, uint32_t instances, uint32_t first, uint32_t firstInstance, bool indexed,
              int32_t vertexOffset) {
@@ -411,7 +418,14 @@ void cmdDraw(Exec& ex, uint32_t count, uint32_t instances, uint32_t first, uint3
   } else {
     for (uint32_t i = 0; i < count; ++i) ids[i] = first + i;
   }
-  for (uint32_t inst = 0; inst < instances; ++inst) drawPrimitives(ex, ids, firstInstance + inst);
+  if (!count || !instances) return;
+  // Several instances per pass (bounded so the post-transform vertex buffer stays small).
+  std::vector<uint32_t> u = ids;
+  std::sort(u.begin(), u.end());
+  const size_t uniqN = size_t(std::unique(u.begin(), u.end()) - u.begin());
+  const uint32_t per = uint32_t(std::max<size_t>(1, std::min<size_t>(instances, (1u << 18) / std::max<size_t>(1, uniqN))));
+  for (uint32_t inst = 0; inst < instances; inst += per)
+    drawPrimitives(ex, ids, firstInstance + inst, std::min(per, instances - inst));
 }
 
 struct DrawStats {
@@ -426,7 +440,7 @@ struct DrawStats {
 using sclk = std::chrono::steady_clock;
 inline uint64_t nsSince(sclk::time_point t) { return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(sclk::now() - t).count()); }
 
-void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t instance) {
+void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t firstInstance, uint32_t instances) {
   Pipeline& P = *ex.pipe;
   auto tStart = sclk::now();
   ++gStats.draws;
@@ -437,9 +451,6 @@ void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t instanc
   std::vector<uint32_t> uniq = ids;
   std::sort(uniq.begin(), uniq.end());
   uniq.erase(std::unique(uniq.begin(), uniq.end()), uniq.end());
-  std::unordered_map<uint32_t, uint32_t> slot;
-  slot.reserve(uniq.size() * 2);
-  for (uint32_t i = 0; i < uniq.size(); ++i) slot[uniq[i]] = i;
   uint32_t posVar = 0;
   const int posComp = vs.findBuiltinOutputComp(0, posVar);  // BuiltIn Position
   const auto vsOut = vs.locationVars(3);
@@ -449,17 +460,47 @@ void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t instanc
   uint32_t K = 0;  // varying floats per vertex
   for (auto& o : vsOut) { outComps.push_back(vs.types[vs.vars[o.second].type].comps); K += outComps.back(); }
   const uint32_t stride = 4 + K;
-  std::vector<float> vout(uniq.size() * stride, 0.0f);
+  const size_t U = uniq.size();
+  std::vector<float> vout(U * instances * stride, 0.0f);
   {
-    // Vertex shading in parallel: blocks of 64 vertices, one interpreter per thread.
-    std::vector<std::unique_ptr<spv::Invocation>> invs(ex.dev->pool->size());
+    // Vertex input plan (resolved once per draw).
+    struct AttrPlan { uint32_t var, nc, stride, floats; const uint8_t* base; bool perInstance; VkFormat fmt; };
+    std::vector<AttrPlan> plan;
+    for (auto& in : vsIn) {
+      AttrPlan ap{in.second, vs.types[vs.vars[in.second].type].comps, 0, 0, nullptr, false, VK_FORMAT_UNDEFINED};
+      const VkVertexInputAttributeDescription* attr = nullptr;
+      for (auto& a : P.attrs) if (int(a.location) == in.first) attr = &a;
+      const VkVertexInputBindingDescription* bd = nullptr;
+      if (attr) for (auto& bb : P.bindings) if (bb.binding == attr->binding) bd = &bb;
+      if (attr && bd && ex.vbs[attr->binding].b) {
+        ap.base = ex.vbs[attr->binding].b->ptr() + ex.vbs[attr->binding].off + attr->offset;
+        ap.stride = bd->stride;
+        ap.perInstance = bd->inputRate == VK_VERTEX_INPUT_RATE_INSTANCE;
+        ap.fmt = attr->format;
+        uint32_t fc = 0;
+        switch (attr->format) {
+          case VK_FORMAT_R32_SFLOAT: case VK_FORMAT_R32_SINT: case VK_FORMAT_R32_UINT: fc = 1; break;
+          case VK_FORMAT_R32G32_SFLOAT: case VK_FORMAT_R32G32_SINT: case VK_FORMAT_R32G32_UINT: fc = 2; break;
+          case VK_FORMAT_R32G32B32_SFLOAT: case VK_FORMAT_R32G32B32_SINT: case VK_FORMAT_R32G32B32_UINT: fc = 3; break;
+          case VK_FORMAT_R32G32B32A32_SFLOAT: case VK_FORMAT_R32G32B32A32_SINT: case VK_FORMAT_R32G32B32A32_UINT: fc = 4; break;
+          default: break;
+        }
+        ap.floats = std::min(fc, ap.nc);
+      }
+      plan.push_back(ap);
+    }
+    // Vertex shading in parallel: batches of 8 vertices of one instance, 8 batches per task.
     std::atomic<bool> failed{false};
-    const int vblocks = int((uniq.size() + 63) / 64);
-    ex.dev->pool->run(vblocks, [&](int vb, int tid) {
-    if (!invs[tid]) invs[tid] = std::make_unique<spv::Invocation>(vs);
-    spv::Invocation& inv = *invs[tid];
-    for (size_t b = size_t(vb) * 64; b < std::min(uniq.size(), size_t(vb) * 64 + 64); b += 8) {
-      const int n = int(std::min<size_t>(8, uniq.size() - b));
+    const size_t nb = (U + 7) / 8;  // batches per instance
+    const size_t batchesTotal = nb * instances;
+    const int vblocks = int((batchesTotal + 7) / 8);
+    ex.dev->pool->run(vblocks, [&](int vb, int) {
+    spv::Invocation& inv = spv::threadInvocation(vs);
+    for (size_t bi = size_t(vb) * 8; bi < std::min(batchesTotal, size_t(vb) * 8 + 8); ++bi) {
+      const uint32_t instance = firstInstance + uint32_t(bi / nb);
+      const size_t b = (bi % nb) * 8;
+      const size_t voutBase = size_t(bi / nb) * U;
+      const int n = int(std::min<size_t>(8, U - b));
       if (vidVar >= 0) {
         int32_t* v = reinterpret_cast<int32_t*>(inv.input(uint32_t(vidVar)));
         for (int l = 0; l < 8; ++l) v[l] = int32_t(uniq[b + std::min(l, n - 1)]);
@@ -468,54 +509,65 @@ void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t instanc
         int32_t* v = reinterpret_cast<int32_t*>(inv.input(uint32_t(iidVar)));
         for (int l = 0; l < 8; ++l) v[l] = int32_t(instance);
       }
-      for (auto& in : vsIn) {
-        const auto* attr = [&]() -> const VkVertexInputAttributeDescription* {
-          for (auto& a : P.attrs) if (int(a.location) == in.first) return &a;
-          return nullptr;
-        }();
-        float* dst = inv.input(in.second);
-        const uint32_t nc = vs.types[vs.vars[in.second].type].comps;
-        for (uint32_t c = 0; c < nc; ++c)
+      for (const AttrPlan& ap : plan) {
+        float* dst = inv.input(ap.var);
+        for (uint32_t c = 0; c < ap.nc; ++c)
           for (int l = 0; l < 8; ++l) dst[c * 8 + l] = c == 3 ? 1.0f : 0.0f;
-        if (!attr) continue;
-        const VkVertexInputBindingDescription* bd = nullptr;
-        for (auto& bb : P.bindings) if (bb.binding == attr->binding) bd = &bb;
-        if (!bd || !ex.vbs[attr->binding].b) continue;
-        const uint8_t* base = ex.vbs[attr->binding].b->ptr() + ex.vbs[attr->binding].off + attr->offset;
+        if (!ap.base) continue;
         for (int l = 0; l < 8; ++l) {
-          const uint32_t idx = bd->inputRate == VK_VERTEX_INPUT_RATE_INSTANCE ? instance : uniq[b + std::min(l, n - 1)];
-          const uint8_t* p = base + size_t(idx) * bd->stride;
+          const uint32_t idx = ap.perInstance ? instance : uniq[b + std::min(l, n - 1)];
+          const uint8_t* p = ap.base + size_t(idx) * ap.stride;
+          if (ap.floats) {  // fast path: 32-bit float/int components
+            for (uint32_t c = 0; c < ap.floats; ++c) std::memcpy(&dst[c * 8 + l], p + 4 * c, 4);
+            continue;
+          }
           float c4[4] = {0, 0, 0, 1};
-          switch (attr->format) {
+          switch (ap.fmt) {
             case VK_FORMAT_R32_SFLOAT: std::memcpy(c4, p, 4); break;
             case VK_FORMAT_R32G32_SFLOAT: std::memcpy(c4, p, 8); break;
             case VK_FORMAT_R32G32B32_SFLOAT: std::memcpy(c4, p, 12); break;
             case VK_FORMAT_R32G32B32A32_SFLOAT: std::memcpy(c4, p, 16); break;
             case VK_FORMAT_R8G8B8A8_UNORM: for (int c = 0; c < 4; ++c) c4[c] = p[c] / 255.0f; break;
             case VK_FORMAT_B8G8R8A8_UNORM: for (int c = 0; c < 4; ++c) c4[c] = p[c == 3 ? 3 : 2 - c] / 255.0f; break;
+            case VK_FORMAT_R8G8B8A8_SNORM:
+              for (int c = 0; c < 4; ++c) c4[c] = std::max(-1.0f, int8_t(p[c]) / 127.0f);
+              break;
+            case VK_FORMAT_R8G8B8A8_UINT: for (int c = 0; c < 4; ++c) { const uint32_t u = p[c]; std::memcpy(&c4[c], &u, 4); } break;
+            case VK_FORMAT_R8G8_UNORM: c4[0] = p[0] / 255.0f; c4[1] = p[1] / 255.0f; break;
+            case VK_FORMAT_R16G16_SFLOAT: case VK_FORMAT_R16G16B16A16_SFLOAT: {
+              const int nn = ap.fmt == VK_FORMAT_R16G16_SFLOAT ? 2 : 4;
+              for (int c = 0; c < nn; ++c) { uint16_t h; std::memcpy(&h, p + 2 * c, 2); c4[c] = halfToFloat(h); }
+              break;
+            }
             case VK_FORMAT_R32_SINT: case VK_FORMAT_R32_UINT: std::memcpy(c4, p, 4); break;  // raw bits
             case VK_FORMAT_R32G32_SINT: case VK_FORMAT_R32G32_UINT: std::memcpy(c4, p, 8); break;
             case VK_FORMAT_R32G32B32A32_SINT: case VK_FORMAT_R32G32B32A32_UINT: std::memcpy(c4, p, 16); break;
-            default: missing("vertex format " + std::to_string(int(attr->format))); break;
+            default: missing("vertex format " + std::to_string(int(ap.fmt))); break;
           }
-          for (uint32_t c = 0; c < std::min(nc, 4u); ++c) dst[c * 8 + l] = c4[c];
+          for (uint32_t c = 0; c < std::min(ap.nc, 4u); ++c) dst[c * 8 + l] = c4[c];
         }
       }
       inv.run(ex, 0xFF);
       if (!inv.error.empty()) { missing("vertex shader: " + inv.error); failed = true; return; }
-      for (int l = 0; l < n; ++l) {
-        float* o = vout.data() + (b + l) * stride;
-        if (posComp >= 0) for (int c = 0; c < 4; ++c) o[c] = inv.output(posVar)[(posComp + c) * 8 + l];
+      {
+        const float* pos = posComp >= 0 ? inv.output(posVar) + posComp * 8 : nullptr;
+        float* o0 = vout.data() + (voutBase + b) * stride;
+        if (pos)
+          for (int l = 0; l < n; ++l)
+            for (int c = 0; c < 4; ++c) o0[size_t(l) * stride + c] = pos[c * 8 + l];
         uint32_t k = 4;
-        for (size_t i = 0; i < vsOut.size(); ++i)
-          for (uint32_t c = 0; c < outComps[i]; ++c) o[k++] = inv.output(vsOut[i].second)[c * 8 + l];
+        for (size_t i = 0; i < vsOut.size(); ++i) {
+          const float* src = inv.output(vsOut[i].second);
+          for (uint32_t c = 0; c < outComps[i]; ++c, ++k)
+            for (int l = 0; l < n; ++l) o0[size_t(l) * stride + k] = src[c * 8 + l];
+        }
       }
     }
     });
     if (failed) return;
   }
   gStats.vsNs += nsSince(tStart);
-  gStats.verts += uniq.size();
+  gStats.verts += U * instances;
   auto tSetup = sclk::now();
   // ---- primitive assembly + clipping (z >= 0, z <= w, guard band) ----
   std::vector<std::array<uint32_t, 3>> prims;
@@ -535,10 +587,6 @@ void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t instanc
   const VkRect2D sc = P.dynScissor ? ex.scissor : P.scissor;
   // Set-up triangles: screen vertices + varyings/w in one flat pool (no per-triangle allocations).
   struct STri { SVert v[3]; uint32_t var; bool front; };
-  std::vector<STri> stris;
-  stris.reserve(prims.size());
-  std::vector<float> varPool;
-  varPool.reserve(prims.size() * 3 * K);
   const float G = 64.0f;
   auto dist = [&](const float* v, int plane) {
     switch (plane) {
@@ -550,6 +598,10 @@ void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t instanc
       default: return G * v[3] + v[1];
     }
   };
+  // Vertex index -> slot in the post-transform buffer (per instance block of U).
+  std::vector<uint32_t> vslot(ids.size());
+  for (size_t i = 0; i < ids.size(); ++i) vslot[i] = uint32_t(std::lower_bound(uniq.begin(), uniq.end(), ids[i]) - uniq.begin());
+  auto setupRange = [&](size_t w0, size_t w1, std::vector<STri>& stris, std::vector<float>& varPool) {
   auto emit = [&](const float* const* pv) {  // pv: 3 clip-space vertices (stride floats)
     STri t;
     for (int j = 0; j < 3; ++j) {
@@ -565,15 +617,27 @@ void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t instanc
     t.front = P.front == VK_FRONT_FACE_COUNTER_CLOCKWISE ? a > 0 : a < 0;
     if ((P.cull & VK_CULL_MODE_FRONT_BIT) && t.front) return;
     if ((P.cull & VK_CULL_MODE_BACK_BIT) && !t.front) return;
+    {  // no pixel centre inside the bounding box (tiny or off-scissor triangle): nothing to draw
+      const float mnx = std::min({t.v[0].x, t.v[1].x, t.v[2].x}), mxx = std::max({t.v[0].x, t.v[1].x, t.v[2].x});
+      const float mny = std::min({t.v[0].y, t.v[1].y, t.v[2].y}), mxy = std::max({t.v[0].y, t.v[1].y, t.v[2].y});
+      const float cx0 = std::max(std::ceil(mnx - 0.5f), float(sc.offset.x));
+      const float cx1 = std::min(std::floor(mxx - 0.5f), float(sc.offset.x + int(sc.extent.width) - 1));
+      const float cy0 = std::max(std::ceil(mny - 0.5f), float(sc.offset.y));
+      const float cy1 = std::min(std::floor(mxy - 0.5f), float(sc.offset.y + int(sc.extent.height) - 1));
+      if (cx0 > cx1 || cy0 > cy1) return;
+    }
     t.var = uint32_t(varPool.size());
     for (int j = 0; j < 3; ++j)
       for (uint32_t k = 0; k < K; ++k) varPool.push_back(pv[j][4 + k] * t.v[j].q);  // perspective: var/w
     stris.push_back(t);
   };
-  std::vector<float> clipBuf;
-  for (auto& pr : prims) {
+  stris.reserve(w1 - w0);
+  varPool.reserve((w1 - w0) * 3 * K);
+  for (size_t w = w0; w < w1; ++w) {
+    const auto& pr = prims[w % prims.size()];
+    const size_t vbase = (w / prims.size()) * U;
     const float* pv[3];
-    for (int j = 0; j < 3; ++j) pv[j] = vout.data() + size_t(slot[ids[pr[j]]]) * stride;
+    for (int j = 0; j < 3; ++j) pv[j] = vout.data() + (vbase + vslot[pr[j]]) * stride;
     int outside = 0;
     for (int plane = 0; plane < 6; ++plane) {
       int n = 0;
@@ -607,6 +671,27 @@ void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t instanc
       emit(tri);
     }
   }
+  };
+  // Ordered chunks (blending needs primitive order), set up in parallel and concatenated.
+  const size_t work = prims.size() * instances;
+  const int chunks = work < 4096 ? 1 : std::min<int>(ex.dev->pool->size() * 2, int(work / 2048));
+  std::vector<std::vector<STri>> cst(chunks);
+  std::vector<std::vector<float>> cvar(chunks);
+  if (chunks == 1) setupRange(0, work, cst[0], cvar[0]);
+  else ex.dev->pool->run(chunks, [&](int c, int) { setupRange(work * c / chunks, work * (c + 1) / chunks, cst[c], cvar[c]); });
+  std::vector<STri> stris;
+  std::vector<float> varPool;
+  if (chunks == 1) { stris.swap(cst[0]); varPool.swap(cvar[0]); }
+  else {
+    size_t nt = 0, nv = 0;
+    for (int c = 0; c < chunks; ++c) { nt += cst[c].size(); nv += cvar[c].size(); }
+    stris.reserve(nt); varPool.reserve(nv);
+    for (int c = 0; c < chunks; ++c) {
+      const uint32_t off = uint32_t(varPool.size());
+      for (STri& t : cst[c]) { t.var += off; stris.push_back(t); }
+      varPool.insert(varPool.end(), cvar[c].begin(), cvar[c].end());
+    }
+  }
   gStats.setupNs += nsSince(tSetup);
   gStats.tris += stris.size();
   if (stris.empty()) return;
@@ -636,11 +721,31 @@ void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t instanc
     if (found) inMap.push_back({fi.second, off});
   }
   const int bands = std::max(1, std::min(ex.dev->pool->size() * 4, (y1 - y0 + 7) / 8));
+  // Bin triangles into bands (order preserved within a band).
+  std::vector<uint32_t> binStart(size_t(bands) + 1, 0), binIdx;
+  {
+    const int H = y1 - y0;
+    std::vector<std::pair<int, int>> range(stris.size());
+    for (size_t i = 0; i < stris.size(); ++i) {
+      const STri& t = stris[i];
+      const float mny = std::min({t.v[0].y, t.v[1].y, t.v[2].y}), mxy = std::max({t.v[0].y, t.v[1].y, t.v[2].y});
+      const int lo = std::clamp(int((int64_t(std::floor(mny)) - y0) * bands / H) - 1, 0, bands - 1);
+      const int hi = std::clamp(int((int64_t(std::ceil(mxy)) - y0) * bands / H) + 1, 0, bands - 1);
+      range[i] = {lo, hi};
+      for (int b = lo; b <= hi; ++b) ++binStart[size_t(b) + 1];
+    }
+    for (int b = 0; b < bands; ++b) binStart[size_t(b) + 1] += binStart[size_t(b)];
+    binIdx.resize(binStart[size_t(bands)]);
+    std::vector<uint32_t> fillPos(binStart.begin(), binStart.end() - 1);
+    for (size_t i = 0; i < stris.size(); ++i)
+      for (int b = range[i].first; b <= range[i].second; ++b) binIdx[fillPos[size_t(b)]++] = uint32_t(i);
+  }
   ex.dev->pool->run(bands, [&](int band, int) {
     const int by0 = y0 + (y1 - y0) * band / bands, by1 = y0 + (y1 - y0) * (band + 1) / bands;
     if (by0 >= by1) return;
-    spv::Invocation inv(fs);
-    for (const STri& t : stris) {
+    spv::Invocation& inv = spv::threadInvocation(fs);
+    for (uint32_t bi = binStart[size_t(band)]; bi < binStart[size_t(band) + 1]; ++bi) {
+      const STri& t = stris[binIdx[bi]];
       const SVert& A = t.v[0]; const SVert& B = t.v[1]; const SVert& C = t.v[2];
       float area = (B.x - A.x) * (C.y - A.y) - (C.x - A.x) * (B.y - A.y);
       const float inv2 = 1.0f / area;
@@ -651,24 +756,31 @@ void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t instanc
       if (bx0 > bx1 || yy0 > yy1) continue;
       bx0 &= ~3;
       yy0 &= ~1;
-      // Edge functions (sign-normalised so inside >= 0).
+      // Edge functions (sign-normalised so inside >= 0), evaluated exactly at each block's
+      // first pixel centre and stepped across the 4x2 lanes with SIMD.
       auto edge = [&](const SVert& p, const SVert& q, float x, float y) { return ((q.x - p.x) * (y - p.y) - (q.y - p.y) * (x - p.x)) * inv2; };
+      using namespace jsnow::simd;
+      alignas(32) static const float kOX[8] = {0, 1, 2, 3, 0, 1, 2, 3}, kOY[8] = {0, 0, 0, 0, 1, 1, 1, 1};
+      const vf OX = load(kOX), OY = load(kOY);
+      const vf d0 = fma(set1(-(C.y - B.y) * inv2), OX, set1((C.x - B.x) * inv2) * OY);
+      const vf d1 = fma(set1(-(A.y - C.y) * inv2), OX, set1((A.x - C.x) * inv2) * OY);
+      const vf d2 = fma(set1(-(B.y - A.y) * inv2), OX, set1((B.x - A.x) * inv2) * OY);
+      const vf Az = set1(A.z), Bz = set1(B.z), Cz = set1(C.z), Aq = set1(A.q), Bq = set1(B.q), Cq = set1(C.q);
+      const float* tvA = varPool.data() + t.var;
       for (int y = yy0; y <= yy1; y += 2)
         for (int x = bx0; x <= bx1; x += 4) {
-          float l0[8], l1[8], l2[8];
-          uint8_t cover = 0;
-          for (int l = 0; l < 8; ++l) {
-            const float px = x + (l & 3) + 0.5f, py = y + (l >> 2) + 0.5f;
-            l0[l] = edge(B, C, px, py); l1[l] = edge(C, A, px, py); l2[l] = edge(A, B, px, py);
-            const int X = x + (l & 3), Y = y + (l >> 2);
-            if (l0[l] >= 0 && l1[l] >= 0 && l2[l] >= 0 && X >= x0 && X < x1 && Y >= by0 && Y < by1) cover |= 1 << l;
-          }
+          const float cx = x + 0.5f, cy = y + 0.5f;
+          const vf L0 = set1(edge(B, C, cx, cy)) + d0, L1 = set1(edge(C, A, cx, cy)) + d1, L2 = set1(edge(A, B, cx, cy)) + d2;
+          uint8_t cover = uint8_t(bits((L0 >= zerof()) & (L1 >= zerof()) & (L2 >= zerof())));
+          if (cover && (x < x0 || x + 3 >= x1 || y < by0 || y + 1 >= by1))
+            for (int l = 0; l < 8; ++l) {
+              const int X = x + (l & 3), Y = y + (l >> 2);
+              if (X < x0 || X >= x1 || Y < by0 || Y >= by1) cover &= uint8_t(~(1 << l));
+            }
           if (!cover) continue;
-          float z[8], qn[8];
-          for (int l = 0; l < 8; ++l) {
-            z[l] = l0[l] * A.z + l1[l] * B.z + l2[l] * C.z;
-            qn[l] = l0[l] * A.q + l1[l] * B.q + l2[l] * C.q;
-          }
+          alignas(32) float l0[8], l1[8], l2[8], z[8], qn[8];
+          const vf Z = fma(L0, Az, fma(L1, Bz, L2 * Cz)), Q = fma(L0, Aq, fma(L1, Bq, L2 * Cq));
+          store(l0, L0); store(l1, L1); store(l2, L2); store(z, Z); store(qn, Q);
           // Early depth test.
           uint8_t pass = cover;
           if (depthView && P.depthTest)
@@ -678,16 +790,18 @@ void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t instanc
                 if (!depthPass(P.depthOp, z[l], readDepth(depthView->format, dp))) pass &= uint8_t(~(1 << l));
               }
           if (!pass) continue;
-          for (auto& im : inMap) {
-            float* dst = inv.input(im.first);
-            const uint32_t nc = fs.types[fs.vars[im.first].type].comps;
-            for (uint32_t c = 0; c < nc; ++c)
-              for (int l = 0; l < 8; ++l) {
-                const float w = 1.0f / qn[l];
-                const float* tv = varPool.data() + t.var;
-                dst[c * 8 + l] = (l0[l] * tv[im.second + c] + l1[l] * tv[K + im.second + c] +
-                                  l2[l] * tv[2 * K + im.second + c]) * w;
+          {
+            const vf Wv = set1(1.0f) / Q;
+            const float* tvB = tvA + K;
+            const float* tvC = tvA + 2 * K;
+            for (auto& im : inMap) {
+              float* dst = inv.input(im.first);
+              const uint32_t nc = fs.types[fs.vars[im.first].type].comps;
+              for (uint32_t c = 0; c < nc; ++c) {
+                const uint32_t o = im.second + c;
+                storeu(dst + c * 8, fma(L0, set1(tvA[o]), fma(L1, set1(tvB[o]), L2 * set1(tvC[o]))) * Wv);
               }
+            }
           }
           if (fragCoordVar >= 0) {
             float* fc = inv.input(uint32_t(fragCoordVar));
@@ -1291,17 +1405,18 @@ void cmdDispatch(Exec& ex, uint32_t gx, uint32_t gy, uint32_t gz, uint32_t bx, u
   const uint64_t groups = uint64_t(gx) * gy * gz;
   if (!groups) return;
   ex.computeMode = true;
-  std::vector<std::unique_ptr<spv::Invocation>> invs(ex.dev->pool->size());
+  const uint32_t batches = (local + 7) / 8;
+  const bool group = cs.usesWorkgroupMemory();  // shared memory / barriers: run batches together
   const int tasks = int(std::min<uint64_t>(groups, 4096));
   std::atomic<bool> failed{false};
-  ex.dev->pool->run(tasks, [&](int task, int tid) {
+  ex.dev->pool->run(tasks, [&](int task, int) {
     if (failed) return;
-    if (!invs[tid]) invs[tid] = std::make_unique<spv::Invocation>(cs);
-    spv::Invocation& inv = *invs[tid];
+    spv::Invocation* batch[64];
+    uint8_t masks[64];
     const uint64_t g0 = groups * task / tasks, g1 = groups * (task + 1) / tasks;
     for (uint64_t g = g0; g < g1; ++g) {
       const uint32_t wx = uint32_t(g % gx) + bx, wy = uint32_t((g / gx) % gy) + by, wz = uint32_t(g / (uint64_t(gx) * gy)) + bz;
-      for (uint32_t base = 0; base < local; base += 8) {
+      auto fill = [&](spv::Invocation& inv, uint32_t base) {
         uint8_t mask = 0;
         auto set3 = [&](int var, auto fn) {
           if (var < 0) return;
@@ -1324,6 +1439,15 @@ void cmdDispatch(Exec& ex, uint32_t gx, uint32_t gy, uint32_t gz, uint32_t bx, u
           uint32_t* v = reinterpret_cast<uint32_t*>(inv.input(uint32_t(lix)));
           for (int l = 0; l < 8; ++l) v[l] = std::min(base + l, local - 1);
         }
+        return mask;
+      };
+      if (group && batches <= 64) {
+        for (uint32_t b = 0; b < batches; ++b) { batch[b] = &spv::threadInvocation(cs, int(b)); masks[b] = fill(*batch[b], b * 8); }
+        if (spv::runWorkgroup(batch, masks, int(batches), ex)) continue;
+      }
+      for (uint32_t base = 0; base < local; base += 8) {
+        spv::Invocation& inv = spv::threadInvocation(cs);
+        const uint8_t mask = fill(inv, base);
         inv.run(ex, mask);
         if (!inv.error.empty()) { missing("compute shader: " + inv.error); failed = true; return; }
       }

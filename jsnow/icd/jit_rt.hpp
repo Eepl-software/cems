@@ -31,6 +31,9 @@ struct Ctx {
   const int32_t* fragY;
   uint32_t active;  // lane mask on entry
   uint32_t killed;  // lane mask written by the shader (OpKill)
+  uint32_t* shared;              // compute: workgroup memory (scalar words, shared by all batches)
+  void (*barrier)(Ctx*);         // compute: OpControlBarrier (yields to the other batches), may be null
+  void* user;                    // driver data for barrier()
 };
 
 typedef void (*ShaderFn)(Ctx*);
