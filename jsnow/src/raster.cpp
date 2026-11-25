@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 
 namespace jsnow {
@@ -361,7 +362,8 @@ void Rasterizer::rasterTile(int tile, int tid, const Target& tg, const PassParam
         const int o = y * kTile + gx;
         const vi ids = loadi(tb.id + o);
         vi col;
-        if (bits(cmpeq(ids, set1i(-1))) == 0xFF) col = set1i(int32_t(kSkyColor));
+        static const bool noShade = std::getenv("JSNOW_PROFILE_NOSHADE") != nullptr;
+        if (noShade || bits(cmpeq(ids, set1i(-1))) == 0xFF) col = set1i(int32_t(kSkyColor));
         else col = shadeGroup(ids, set1(float(tileX + gx) + 0.5f) + iotaf(), py, s, attrOf);
         storei(tb.color + o, col);
       }
