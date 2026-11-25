@@ -4,6 +4,7 @@
 // a 4x2 pixel block, so derivatives come from neighbouring lanes).
 #include <cstdint>
 #include <memory>
+#include <array>
 #include <string>
 #include <vector>
 
@@ -42,10 +43,13 @@ struct Texture {
   int width = 0, height = 0, levels = 1;
   std::vector<size_t> levelOffset;
   std::vector<int> levelPitch;  // bytes per row
-  int format = 0;               // 0 = RGBA8 unorm, 1 = BGRA8 unorm, 2 = RGBA32F
+  int format = 0;  // 0 RGBA8, 1 BGRA8, 2 RGBA32F, 3 D16, 4 D32F, 5 D24S8, 6 R8, 7 RGBA16F, 8 RG8
   bool linear = true;           // mag/min filter
   bool mipLinear = false;
   int addressU = 0, addressV = 0;  // 0 repeat, 1 mirrored repeat, 2 clamp to edge
+  bool compare = false;            // depth-compare sampler
+  int compareOp = 3;               // VkCompareOp (default LESS_OR_EQUAL)
+  float borderOne = 1.0f;          // border value for clamp-to-border depth lookups
 };
 
 // Bound resources, supplied by the driver for each draw.
@@ -117,6 +121,9 @@ class Module {
   std::vector<std::pair<int, uint32_t>> locationVars(uint32_t storage) const;  // (location, var id)
   int findBuiltinInput(int builtin) const;
   std::vector<std::string> unsupported;  // opcodes seen at parse time that exec() does not handle
+  std::vector<int32_t> specId;  // id -> SpecId decoration (-1: none)
+  // Applies VkSpecializationInfo-style entries (specId, byte offset, size) over `data`.
+  void specialize(const std::vector<std::array<uint32_t, 3>>& entries, const uint8_t* data);
 
  private:
   void computeComps(uint32_t id);

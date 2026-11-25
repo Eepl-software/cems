@@ -20,7 +20,9 @@ enum Op : uint16_t {
   OpCopyMemory = 63, OpAccessChain = 65, OpInBoundsAccessChain = 66, OpDecorate = 71, OpMemberDecorate = 72,
   OpVectorExtractDynamic = 77, OpVectorInsertDynamic = 78, OpVectorShuffle = 79, OpCompositeConstruct = 80,
   OpCompositeExtract = 81, OpCompositeInsert = 82, OpCopyObject = 83, OpTranspose = 84, OpSampledImage = 86,
-  OpImageSampleImplicitLod = 87, OpImageSampleExplicitLod = 88, OpImageFetch = 95, OpImage = 100,
+  OpImageSampleImplicitLod = 87, OpImageSampleExplicitLod = 88, OpImageSampleDrefImplicitLod = 89,
+  OpImageSampleDrefExplicitLod = 90, OpImageFetch = 95, OpImage = 100, OpImageQuerySizeLod = 103,
+  OpImageQuerySize = 104, OpImageQueryLevels = 106,
   OpConvertFToU = 109, OpConvertFToS = 110, OpConvertSToF = 111, OpConvertUToF = 112, OpUConvert = 113,
   OpSConvert = 114, OpFConvert = 115, OpBitcast = 124, OpSNegate = 126, OpFNegate = 127, OpIAdd = 128,
   OpFAdd = 129, OpISub = 130, OpFSub = 131, OpIMul = 132, OpFMul = 133, OpUDiv = 134, OpSDiv = 135, OpFDiv = 136,
@@ -44,7 +46,7 @@ enum Op : uint16_t {
 };
 enum Storage { UniformConstant = 0, Input = 1, Uniform = 2, Output = 3, Private = 6, Function = 7, PushConstant = 9,
                StorageBuffer = 12 };
-enum Dec { DecRowMajor = 4, DecColMajor = 5, DecArrayStride = 6, DecMatrixStride = 7, DecBuiltIn = 11,
+enum Dec { DecSpecId = 1, DecRowMajor = 4, DecColMajor = 5, DecArrayStride = 6, DecMatrixStride = 7, DecBuiltIn = 11,
            DecLocation = 30, DecBinding = 33, DecDescriptorSet = 34, DecOffset = 35 };
 
 inline float f(uint32_t u) { float x; std::memcpy(&x, &u, 4); return x; }
@@ -95,6 +97,7 @@ std::shared_ptr<Module> Module::parse(const uint32_t* w, size_t count, std::stri
   m->resultType.assign(B, 0);
   m->labelInst.assign(B, -1);
   m->functionInst.assign(B, -1);
+  m->specId.assign(B, -1);
   std::map<uint32_t, std::vector<std::pair<uint32_t, uint32_t>>> dec;  // id -> (decoration, value)
   std::map<std::pair<uint32_t, uint32_t>, std::vector<std::pair<uint32_t, uint32_t>>> mdec;
   struct EP { int model; uint32_t fn; std::string name; std::vector<uint32_t> iface; };
@@ -169,11 +172,13 @@ std::shared_ptr<Module> Module::parse(const uint32_t* w, size_t count, std::stri
       }
       case OpTypeFunction: m->types[a[0]].kind = Kind::Function; break;
       case OpConstant: case OpSpecConstant:
+        if (op == OpSpecConstant) m->specId[a[1]] = int32_t(decOf(a[1], DecSpecId, uint32_t(-1)));
         m->resultType[a[1]] = a[0];
         m->isConst[a[1]] = 1;
         m->constVal[a[1]] = {a[2]};
         break;
       case OpConstantTrue: case OpConstantFalse: case OpSpecConstantTrue: case OpSpecConstantFalse:
+        if (op == OpSpecConstantTrue || op == OpSpecConstantFalse) m->specId[a[1]] = int32_t(decOf(a[1], DecSpecId, uint32_t(-1)));
         m->resultType[a[1]] = a[0];
         m->isConst[a[1]] = 1;
         m->constVal[a[1]] = {uint32_t(op == OpConstantTrue || op == OpSpecConstantTrue)};
@@ -216,6 +221,8 @@ std::shared_ptr<Module> Module::parse(const uint32_t* w, size_t count, std::stri
       case OpInBoundsAccessChain: case OpVectorExtractDynamic: case OpVectorInsertDynamic: case OpVectorShuffle:
       case OpCompositeConstruct: case OpCompositeExtract: case OpCompositeInsert: case OpCopyObject: case OpTranspose:
       case OpSampledImage: case OpImageSampleImplicitLod: case OpImageSampleExplicitLod: case OpImageFetch:
+      case OpImageSampleDrefImplicitLod: case OpImageSampleDrefExplicitLod: case OpImageQuerySizeLod:
+      case OpImageQuerySize: case OpImageQueryLevels:
       case OpImage: case OpPhi: case OpUndef: case OpSelect:
         m->resultType[a[1]] = a[0];
         break;
@@ -235,6 +242,29 @@ std::shared_ptr<Module> Module::parse(const uint32_t* w, size_t count, std::stri
 }
 
 bool Module::select(const std::string&) { return entryFunction != 0; }
+
+void Module::specialize(const std::vector<std::array<uint32_t, 3>>& entries, const uint8_t* data) {
+  for (uint32_t id = 0; id < bound; ++id) {
+    if (specId[id] < 0) continue;
+    for (const auto& e : entries)
+      if (int32_t(e[0]) == specId[id]) {
+        uint32_t v = 0;
+        if (e[2] == 1) v = data[e[1]] != 0;  // VkBool32 may be given as 1 byte
+        else std::memcpy(&v, data + e[1], std::min<uint32_t>(4, e[2]));
+        if (types[resultType[id]].kind == Kind::Bool) v = v != 0;
+        constVal[id] = {v};
+      }
+  }
+  // Re-derive composite spec constants from their (possibly patched) parts.
+  const uint32_t* w = words.data();
+  for (const Inst& in : insts)
+    if (in.op == OpSpecConstantComposite) {
+      const uint32_t* a = w + in.at + 1;
+      std::vector<uint32_t> v;
+      for (int k = 2; k < in.wc - 1; ++k) v.insert(v.end(), constVal[a[k]].begin(), constVal[a[k]].end());
+      constVal[a[1]] = v;
+    }
+}
 
 int Module::findBuiltinOutputComp(int builtin, uint32_t& var) const {
   for (uint32_t id = 0; id < bound; ++id) {
@@ -356,7 +386,21 @@ float sampleTexture(const Texture& tx, float s, float t, float lod, int ch) {
   auto texel = [&](int x, int y) {
     x = wrap(x, w, tx.addressU); y = wrap(y, h, tx.addressV);
     const uint8_t* row = tx.data + tx.levelOffset[level] + size_t(y) * tx.levelPitch[level];
-    if (tx.format == 2) { float v; std::memcpy(&v, row + x * 16 + ch * 4, 4); return v; }
+    switch (tx.format) {
+      case 2: { float v; std::memcpy(&v, row + x * 16 + ch * 4, 4); return v; }
+      case 3: { uint16_t v; std::memcpy(&v, row + x * 2, 2); return ch == 3 ? 1.0f : v / 65535.0f; }
+      case 4: { float v; std::memcpy(&v, row + x * 4, 4); return ch == 3 ? 1.0f : v; }
+      case 5: { uint32_t v; std::memcpy(&v, row + x * 4, 4); return ch == 3 ? 1.0f : (v & 0xFFFFFF) / 16777215.0f; }
+      case 6: return ch == 0 ? row[x] / 255.0f : ch == 3 ? 1.0f : 0.0f;
+      case 8: return ch < 2 ? row[x * 2 + ch] / 255.0f : ch == 3 ? 1.0f : 0.0f;
+      case 7: {
+        uint16_t h; std::memcpy(&h, row + x * 8 + ch * 2, 2);
+        const uint32_t sgn = (h >> 15) & 1, e = (h >> 10) & 31, mnt = h & 1023;
+        float r = e == 0 ? std::ldexp(float(mnt), -24) : e == 31 ? (mnt ? NAN : INFINITY) : std::ldexp(float(mnt | 1024), int(e) - 25);
+        return sgn ? -r : r;
+      }
+      default: break;
+    }
     int c = ch;
     if (tx.format == 1 && ch < 3) c = 2 - ch;  // BGRA
     return row[x * 4 + c] * (1.0f / 255.0f);
@@ -622,6 +666,56 @@ bool Invocation::exec(const Resources& res, uint8_t mask, bool scalar, int lane)
             v[size_t(ch) * L + l] = u(tx ? sampleTexture(*tx, f(c[l]), f(c[L + l]), lodv[l], ch) : (ch == 3 ? 1.0f : 0.0f));
         break;
       }
+      case OpImageQuerySizeLod: case OpImageQuerySize: case OpImageQueryLevels: {
+        auto& v = ensure(a[1]);
+        const Variable& var = m.vars[val_[a[2]][0]];
+        const Texture* tx = res.texture(var.set, var.binding);
+        const int lod = in.op == OpImageQuerySizeLod ? int(val_[a[3]][0]) : 0;
+        const uint32_t c = comps(a[1]);
+        for (int l = 0; l < L; ++l) {
+          if (in.op == OpImageQueryLevels) { v[l] = tx ? uint32_t(tx->levels) : 1; continue; }
+          const uint32_t w2 = tx ? uint32_t(std::max(1, tx->width >> lod)) : 1, h2 = tx ? uint32_t(std::max(1, tx->height >> lod)) : 1;
+          v[l] = w2;
+          if (c > 1) v[L + l] = h2;
+          for (uint32_t k = 2; k < c; ++k) v[k * L + l] = 1;
+        }
+        break;
+      }
+      case OpImageSampleDrefImplicitLod: case OpImageSampleDrefExplicitLod: {
+        // Depth comparison with 2x2 bilinear PCF.
+        auto& v = ensure(a[1]);
+        const Variable& var = m.vars[val_[a[2]][0]];
+        const Texture* tx = res.texture(var.set, var.binding);
+        const auto& c = val_[a[3]];
+        const auto& dref = val_[a[4]];
+        for (int l = 0; l < L; ++l) {
+          float r = 1.0f;
+          if (tx) {
+            const float s0 = f(c[l]), t0 = f(c[L + l]), ref = f(dref[l]);
+            const float x = s0 * tx->width - 0.5f, y = t0 * tx->height - 0.5f;
+            const int x0 = int(std::floor(x)), y0 = int(std::floor(y));
+            const float ax = x - x0, ay = y - y0;
+            auto cmp = [&](int xx, int yy) {
+              if (xx < 0 || yy < 0 || xx >= tx->width || yy >= tx->height) return tx->borderOne;
+              const float d = sampleTexture(*tx, (xx + 0.5f) / tx->width, (yy + 0.5f) / tx->height, 0.0f, 0);
+              switch (tx->compareOp) {
+                case 1: return ref < d ? 1.0f : 0.0f;
+                case 2: return ref == d ? 1.0f : 0.0f;
+                case 3: return ref <= d ? 1.0f : 0.0f;
+                case 4: return ref > d ? 1.0f : 0.0f;
+                case 6: return ref >= d ? 1.0f : 0.0f;
+                case 7: return 1.0f;
+                default: return 0.0f;
+              }
+            };
+            const float t1 = cmp(x0, y0) + (cmp(x0 + 1, y0) - cmp(x0, y0)) * ax;
+            const float b1 = cmp(x0, y0 + 1) + (cmp(x0 + 1, y0 + 1) - cmp(x0, y0 + 1)) * ax;
+            r = t1 + (b1 - t1) * ay;
+          }
+          v[l] = u(r);
+        }
+        break;
+      }
       case OpDPdx: case OpDPdxFine: case OpDPdxCoarse: case OpDPdy: case OpDPdyFine: case OpDPdyCoarse:
       case OpFwidth: case OpFwidthFine: case OpFwidthCoarse: {
         auto& v = ensure(a[1]);
@@ -771,6 +865,35 @@ bool Invocation::exec(const Resources& res, uint8_t mask, bool scalar, int lane)
               for (uint32_t k = 0; k < c; ++k) s += f(x[k * L + l]) * f(x[k * L + l]);
               const float inv = s > 0 ? 1.0f / std::sqrt(s) : 0.0f;
               for (uint32_t k = 0; k < c; ++k) v[k * L + l] = u(f(x[k * L + l]) * inv);
+            }
+            break;
+          }
+          case 33: case 34: {  // Determinant, MatrixInverse (column-major, n = 2..4)
+            const auto& M = arg(0);
+            const uint32_t n = e == 34 ? uint32_t(std::lround(std::sqrt(double(c)))) : uint32_t(std::lround(std::sqrt(double(M.size() / L))));
+            for (int l = 0; l < L; ++l) {
+              double A[4][8] = {};
+              for (uint32_t col = 0; col < n; ++col)
+                for (uint32_t row = 0; row < n; ++row) { A[row][col] = f(M[(col * n + row) * L + l]); A[row][n + col] = row == col; }
+              double det = 1;
+              for (uint32_t i2 = 0; i2 < n; ++i2) {  // Gauss-Jordan with partial pivoting
+                uint32_t piv = i2;
+                for (uint32_t r2 = i2 + 1; r2 < n; ++r2) if (std::fabs(A[r2][i2]) > std::fabs(A[piv][i2])) piv = r2;
+                if (piv != i2) { for (uint32_t k2 = 0; k2 < 2 * n; ++k2) std::swap(A[i2][k2], A[piv][k2]); det = -det; }
+                const double d = A[i2][i2];
+                det *= d;
+                if (d == 0) continue;
+                for (uint32_t k2 = 0; k2 < 2 * n; ++k2) A[i2][k2] /= d;
+                for (uint32_t r2 = 0; r2 < n; ++r2)
+                  if (r2 != i2) {
+                    const double fct = A[r2][i2];
+                    for (uint32_t k2 = 0; k2 < 2 * n; ++k2) A[r2][k2] -= fct * A[i2][k2];
+                  }
+              }
+              if (e == 33) v[l] = u(float(det));
+              else
+                for (uint32_t col = 0; col < n; ++col)
+                  for (uint32_t row = 0; row < n; ++row) v[(col * n + row) * L + l] = u(float(A[row][n + col]));
             }
             break;
           }

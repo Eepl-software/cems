@@ -71,9 +71,12 @@ int formatSize(VkFormat f) {
     case VK_FORMAT_R32_SINT: case VK_FORMAT_D24_UNORM_S8_UINT: case VK_FORMAT_X8_D24_UNORM_PACK32:
     case VK_FORMAT_A8B8G8R8_UNORM_PACK32:
       return 4;
-    case VK_FORMAT_D16_UNORM: case VK_FORMAT_R8G8_UNORM: return 2;
+    case VK_FORMAT_D16_UNORM: case VK_FORMAT_R8G8_UNORM: case VK_FORMAT_R16_SFLOAT: return 2;
+    case VK_FORMAT_R16G16B16A16_SFLOAT: case VK_FORMAT_R32G32_UINT: case VK_FORMAT_R32G32_SINT: return 8;
+    case VK_FORMAT_R16G16_SFLOAT: case VK_FORMAT_A2B10G10R10_UNORM_PACK32: case VK_FORMAT_B10G11R11_UFLOAT_PACK32: return 4;
     case VK_FORMAT_R8_UNORM: return 1;
     case VK_FORMAT_R32G32_SFLOAT: case VK_FORMAT_D32_SFLOAT_S8_UINT: return 8;
+    case VK_FORMAT_R32G32B32A32_UINT: case VK_FORMAT_R32G32B32A32_SINT: return 16;
     case VK_FORMAT_R32G32B32_SFLOAT: return 12;
     case VK_FORMAT_R32G32B32A32_SFLOAT: return 16;
     default: return 0;
@@ -138,8 +141,7 @@ struct Pipeline {
   VkFrontFace front = VK_FRONT_FACE_COUNTER_CLOCKWISE;
   bool depthTest = false, depthWrite = false;
   VkCompareOp depthOp = VK_COMPARE_OP_LESS;
-  VkPipelineColorBlendAttachmentState blend{};
-  bool hasBlend = false;
+  std::vector<VkPipelineColorBlendAttachmentState> blends;
   VkViewport viewport{};
   VkRect2D scissor{};
   bool dynViewport = false, dynScissor = false;
@@ -181,6 +183,7 @@ struct Exec : spv::Resources {
   VkViewport vp{};
   VkRect2D scissor{};
   uint8_t push[256] = {};
+  std::atomic<uint64_t>* query = nullptr;  // active occlusion query (samples passed)
   const uint8_t* buffer(int set, int binding) const override {
     if (set < 0 || set >= 8 || !sets[set] || binding < 0 || size_t(binding) >= sets[set]->b.size()) return nullptr;
     const Descriptor& d = sets[set]->b[binding];
@@ -218,9 +221,18 @@ void prepareTexture(Descriptor& d) {
     t.levelPitch.push_back(int(im->pitch(l)));
   }
   const VkFormat f = d.view->format;
-  t.format = (f == VK_FORMAT_B8G8R8A8_UNORM || f == VK_FORMAT_B8G8R8A8_SRGB) ? 1
-             : f == VK_FORMAT_R32G32B32A32_SFLOAT ? 2 : 0;
-  if (formatSize(f) != 4 && t.format != 2) missing("texture format " + std::to_string(int(f)));
+  switch (f) {
+    case VK_FORMAT_B8G8R8A8_UNORM: case VK_FORMAT_B8G8R8A8_SRGB: t.format = 1; break;
+    case VK_FORMAT_R32G32B32A32_SFLOAT: t.format = 2; break;
+    case VK_FORMAT_D16_UNORM: t.format = 3; break;
+    case VK_FORMAT_D32_SFLOAT: t.format = 4; break;
+    case VK_FORMAT_D24_UNORM_S8_UINT: case VK_FORMAT_X8_D24_UNORM_PACK32: t.format = 5; break;
+    case VK_FORMAT_R8_UNORM: t.format = 6; break;
+    case VK_FORMAT_R16G16B16A16_SFLOAT: t.format = 7; break;
+    case VK_FORMAT_R8G8_UNORM: t.format = 8; break;
+    case VK_FORMAT_R8G8B8A8_UNORM: case VK_FORMAT_R8G8B8A8_SRGB: t.format = 0; break;
+    default: t.format = 0; missing("texture format " + std::to_string(int(f)));
+  }
   if (d.sampler) {
     t.linear = d.sampler->ci.magFilter == VK_FILTER_LINEAR;
     auto am = [](VkSamplerAddressMode m) {
@@ -229,9 +241,27 @@ void prepareTexture(Descriptor& d) {
     };
     t.addressU = am(d.sampler->ci.addressModeU);
     t.addressV = am(d.sampler->ci.addressModeV);
+    t.compare = d.sampler->ci.compareEnable;
+    t.compareOp = int(d.sampler->ci.compareOp);
+    t.borderOne = (d.sampler->ci.borderColor == VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE ||
+                   d.sampler->ci.borderColor == VK_BORDER_COLOR_INT_OPAQUE_WHITE) ? 1.0f : 0.0f;
   }
 }
 
+inline uint16_t toHalf(float f) {
+  uint32_t x; std::memcpy(&x, &f, 4);
+  const uint32_t sgn = (x >> 16) & 0x8000;
+  int e = int((x >> 23) & 0xFF) - 127 + 15;
+  uint32_t mnt = x & 0x7FFFFF;
+  if (e >= 31) return uint16_t(sgn | 0x7C00 | (((x >> 23) & 0xFF) == 0xFF && mnt ? 0x200 : 0));
+  if (e <= 0) { if (e < -10) return uint16_t(sgn); mnt |= 0x800000; return uint16_t(sgn | (mnt >> (14 - e))); }
+  return uint16_t(sgn | (e << 10) | (mnt >> 13));
+}
+inline float fromHalf(uint16_t h) {
+  const uint32_t sgn = (h >> 15) & 1, e = (h >> 10) & 31, mnt = h & 1023;
+  const float r = e == 0 ? std::ldexp(float(mnt), -24) : e == 31 ? (mnt ? NAN : INFINITY) : std::ldexp(float(mnt | 1024), int(e) - 25);
+  return sgn ? -r : r;
+}
 // Colour / depth attachment access.
 void writeColor(VkFormat f, uint8_t* p, const float c[4]) {
   auto q = [](float v) { return uint8_t(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
@@ -242,6 +272,10 @@ void writeColor(VkFormat f, uint8_t* p, const float c[4]) {
       p[0] = q(c[0]); p[1] = q(c[1]); p[2] = q(c[2]); p[3] = q(c[3]); break;
     case VK_FORMAT_R32G32B32A32_SFLOAT: std::memcpy(p, c, 16); break;
     case VK_FORMAT_R32_SFLOAT: std::memcpy(p, c, 4); break;
+    case VK_FORMAT_R16G16B16A16_SFLOAT: for (int i = 0; i < 4; ++i) { const uint16_t h = toHalf(c[i]); std::memcpy(p + 2 * i, &h, 2); } break;
+    case VK_FORMAT_R16_SFLOAT: { const uint16_t h = toHalf(c[0]); std::memcpy(p, &h, 2); break; }
+    case VK_FORMAT_R8_UNORM: p[0] = q(c[0]); break;
+    case VK_FORMAT_R8G8_UNORM: p[0] = q(c[0]); p[1] = q(c[1]); break;
     default: break;
   }
 }
@@ -250,6 +284,10 @@ void readColor(VkFormat f, const uint8_t* p, float c[4]) {
     case VK_FORMAT_B8G8R8A8_UNORM: case VK_FORMAT_B8G8R8A8_SRGB:
       c[0] = p[2] / 255.0f; c[1] = p[1] / 255.0f; c[2] = p[0] / 255.0f; c[3] = p[3] / 255.0f; break;
     case VK_FORMAT_R32G32B32A32_SFLOAT: std::memcpy(c, p, 16); break;
+    case VK_FORMAT_R16G16B16A16_SFLOAT: for (int i = 0; i < 4; ++i) { uint16_t h; std::memcpy(&h, p + 2 * i, 2); c[i] = fromHalf(h); } break;
+    case VK_FORMAT_R8_UNORM: c[0] = p[0] / 255.0f; c[1] = c[2] = 0; c[3] = 1; break;
+    case VK_FORMAT_R8G8_UNORM: c[0] = p[0] / 255.0f; c[1] = p[1] / 255.0f; c[2] = 0; c[3] = 1; break;
+    case VK_FORMAT_R32_SFLOAT: std::memcpy(c, p, 4); c[1] = c[2] = 0; c[3] = 1; break;
     default:
       c[0] = p[0] / 255.0f; c[1] = p[1] / 255.0f; c[2] = p[2] / 255.0f; c[3] = p[3] / 255.0f; break;
   }
@@ -381,6 +419,9 @@ void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t instanc
             case VK_FORMAT_R32G32B32A32_SFLOAT: std::memcpy(c4, p, 16); break;
             case VK_FORMAT_R8G8B8A8_UNORM: for (int c = 0; c < 4; ++c) c4[c] = p[c] / 255.0f; break;
             case VK_FORMAT_B8G8R8A8_UNORM: for (int c = 0; c < 4; ++c) c4[c] = p[c == 3 ? 3 : 2 - c] / 255.0f; break;
+            case VK_FORMAT_R32_SINT: case VK_FORMAT_R32_UINT: std::memcpy(c4, p, 4); break;  // raw bits
+            case VK_FORMAT_R32G32_SINT: case VK_FORMAT_R32G32_UINT: std::memcpy(c4, p, 8); break;
+            case VK_FORMAT_R32G32B32A32_SINT: case VK_FORMAT_R32G32B32A32_UINT: std::memcpy(c4, p, 16); break;
             default: missing("vertex format " + std::to_string(int(attr->format))); break;
           }
           for (uint32_t c = 0; c < std::min(nc, 4u); ++c) dst[c * 8 + l] = c4[c];
@@ -476,7 +517,6 @@ void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t instanc
   if (stris.empty()) return;
   // ---- rasterization: horizontal bands per thread, 4x2 pixel blocks ----
   RenderPass& rp = *ex.rp;
-  ImageView* colorView = rp.color.empty() ? nullptr : ex.fb->views[rp.color[0]];
   ImageView* depthView = rp.depth >= 0 ? ex.fb->views[rp.depth] : nullptr;
   int x0 = std::max<int>(ex.area.offset.x, sc.offset.x), y0 = std::max<int>(ex.area.offset.y, sc.offset.y);
   int x1 = std::min<int>(ex.area.offset.x + int(ex.area.extent.width), sc.offset.x + int(sc.extent.width));
@@ -563,29 +603,39 @@ void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t instanc
           inv.run(ex, 0xFF);  // helper lanes run too (derivatives)
           if (!inv.error.empty()) { missing("fragment shader: " + inv.error); return; }
           pass &= uint8_t(~inv.killed());
+          if (ex.query && fsOut.empty())
+            for (int l = 0; l < 8; ++l) if (pass & (1 << l)) ex.query->fetch_add(1, std::memory_order_relaxed);
           for (int l = 0; l < 8; ++l) {
             if (!(pass & (1 << l))) continue;
             const int X = x + (l & 3), Y = y + (l >> 2);
             if (depthView && P.depthWrite)
               writeDepth(depthView->format, depthView->img->at(0, depthView->baseLayer, X, Y), z[l]);
-            if (colorView && !fsOut.empty()) {
-              float c[4];
-              for (int ch = 0; ch < 4; ++ch) c[ch] = inv.output(fsOut[0].second)[ch * 8 + l];
-              uint8_t* cp = colorView->img->at(colorView->baseLevel, colorView->baseLayer, X, Y);
-              if (P.hasBlend && P.blend.blendEnable) {
-                float d[4];
-                readColor(colorView->format, cp, d);
+            for (auto& fo : fsOut) {  // one output per colour attachment (by location)
+              if (fo.first < 0 || size_t(fo.first) >= rp.color.size() || rp.color[fo.first] == VK_ATTACHMENT_UNUSED) continue;
+              ImageView* cv = ex.fb->views[rp.color[fo.first]];
+              const uint32_t nc = fs.types[fs.vars[fo.second].type].comps;
+              float c[4] = {0, 0, 0, 1};
+              for (uint32_t ch = 0; ch < std::min(nc, 4u); ++ch) c[ch] = inv.output(fo.second)[ch * 8 + l];
+              uint8_t* cp = cv->img->at(cv->baseLevel, cv->baseLayer, X, Y);
+              const VkPipelineColorBlendAttachmentState* bs =
+                  size_t(fo.first) < P.blends.size() ? &P.blends[fo.first] : nullptr;
+              float d[4];
+              if ((bs && bs->blendEnable) || (bs && bs->colorWriteMask != 0xF)) readColor(cv->format, cp, d);
+              if (bs && bs->blendEnable) {
                 float o[4];
                 for (int ch = 0; ch < 4; ++ch) {
                   const bool alpha = ch == 3;
-                  const float sf = blendFactor(alpha ? P.blend.srcAlphaBlendFactor : P.blend.srcColorBlendFactor, c, d, ch);
-                  const float df = blendFactor(alpha ? P.blend.dstAlphaBlendFactor : P.blend.dstColorBlendFactor, c, d, ch);
+                  const float sf = blendFactor(alpha ? bs->srcAlphaBlendFactor : bs->srcColorBlendFactor, c, d, ch);
+                  const float df = blendFactor(alpha ? bs->dstAlphaBlendFactor : bs->dstColorBlendFactor, c, d, ch);
                   o[ch] = c[ch] * sf + d[ch] * df;  // VK_BLEND_OP_ADD
                 }
                 std::memcpy(c, o, sizeof o);
               }
-              writeColor(colorView->format, cp, c);
+              if (bs && bs->colorWriteMask != 0xF)
+                for (int ch = 0; ch < 4; ++ch) if (!(bs->colorWriteMask & (1 << ch))) c[ch] = d[ch];
+              writeColor(cv->format, cp, c);
             }
+            if (ex.query) ex.query->fetch_add(1, std::memory_order_relaxed);
           }
         }
     }
@@ -652,7 +702,8 @@ using namespace icd;
 #define VKAPI extern "C" VKAPI_ATTR
 static const VkExtensionProperties kInstanceExts[] = {{VK_KHR_SURFACE_EXTENSION_NAME, 25},
                                                       {VK_KHR_XCB_SURFACE_EXTENSION_NAME, 6}};
-static const VkExtensionProperties kDeviceExts[] = {{VK_KHR_SWAPCHAIN_EXTENSION_NAME, 70}};
+static const VkExtensionProperties kDeviceExts[] = {{VK_KHR_SWAPCHAIN_EXTENSION_NAME, 70},
+                                                    {VK_KHR_MAINTENANCE_1_EXTENSION_NAME, 2}};
 
 template <class T>
 static VkResult fillArray(uint32_t* count, T* out, const T* src, uint32_t n) {
@@ -759,8 +810,13 @@ VKAPI void VKAPI_CALL jsnow_GetPhysicalDeviceFormatProperties(VkPhysicalDevice, 
       p->linearTilingFeatures = p->optimalTilingFeatures = color;
       p->bufferFeatures = VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT;
       break;
-    case VK_FORMAT_R32G32B32A32_SFLOAT:
+    case VK_FORMAT_R32G32B32A32_SFLOAT: case VK_FORMAT_R16G16B16A16_SFLOAT: case VK_FORMAT_R8_UNORM:
+    case VK_FORMAT_R8G8_UNORM:
       p->linearTilingFeatures = p->optimalTilingFeatures = color;
+      p->bufferFeatures = VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT;
+      break;
+    case VK_FORMAT_R32_SINT: case VK_FORMAT_R32_UINT: case VK_FORMAT_R32G32_SINT: case VK_FORMAT_R32G32B32A32_SINT:
+    case VK_FORMAT_R32G32B32A32_UINT:
       p->bufferFeatures = VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT;
       break;
     case VK_FORMAT_R32_SFLOAT: case VK_FORMAT_R32G32_SFLOAT: case VK_FORMAT_R32G32B32_SFLOAT:
@@ -768,7 +824,8 @@ VKAPI void VKAPI_CALL jsnow_GetPhysicalDeviceFormatProperties(VkPhysicalDevice, 
       break;
     case VK_FORMAT_D16_UNORM: case VK_FORMAT_D32_SFLOAT: case VK_FORMAT_D24_UNORM_S8_UINT:
       p->optimalTilingFeatures = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
-                                 VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+                                 VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+                                 VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT | VK_FORMAT_FEATURE_BLIT_SRC_BIT;
       p->linearTilingFeatures = p->optimalTilingFeatures;
       break;
     default: break;
@@ -791,7 +848,7 @@ VKAPI void VKAPI_CALL jsnow_GetPhysicalDeviceSparseImageFormatProperties(VkPhysi
   *c = 0;
 }
 VKAPI VkResult VKAPI_CALL jsnow_EnumerateDeviceExtensionProperties(VkPhysicalDevice, const char*, uint32_t* c, VkExtensionProperties* p) {
-  return fillArray(c, p, kDeviceExts, 1);
+  return fillArray(c, p, kDeviceExts, 2);
 }
 VKAPI VkResult VKAPI_CALL jsnow_EnumerateDeviceLayerProperties(VkPhysicalDevice, uint32_t* c, VkLayerProperties*) {
   *c = 0;
@@ -1009,7 +1066,6 @@ VKAPI VkResult VKAPI_CALL jsnow_CreateRenderPass(VkDevice, const VkRenderPassCre
   if (ci->subpassCount > 1) missing("multiple subpasses");
   const VkSubpassDescription& s = ci->pSubpasses[0];
   for (uint32_t i = 0; i < s.colorAttachmentCount; ++i) rp->color.push_back(s.pColorAttachments[i].attachment);
-  if (s.colorAttachmentCount > 1) missing("multiple colour attachments (only #0 is written)");
   if (s.pDepthStencilAttachment && s.pDepthStencilAttachment->attachment != VK_ATTACHMENT_UNUSED)
     rp->depth = int(s.pDepthStencilAttachment->attachment);
   *out = from<VkRenderPass>(rp);
@@ -1030,10 +1086,17 @@ VKAPI VkResult VKAPI_CALL jsnow_CreateGraphicsPipelines(VkDevice, VkPipelineCach
     const VkGraphicsPipelineCreateInfo& c = ci[i];
     for (uint32_t s = 0; s < c.stageCount; ++s) {
       auto mod = to<ShaderModule>(c.pStages[s].module)->mod;
+      if (const VkSpecializationInfo* si = c.pStages[s].pSpecializationInfo) {
+        auto copy = std::make_shared<spv::Module>(*mod);
+        std::vector<std::array<uint32_t, 3>> entries;
+        for (uint32_t k = 0; k < si->mapEntryCount; ++k)
+          entries.push_back({si->pMapEntries[k].constantID, si->pMapEntries[k].offset, uint32_t(si->pMapEntries[k].size)});
+        copy->specialize(entries, static_cast<const uint8_t*>(si->pData));
+        mod = copy;
+      }
       if (c.pStages[s].stage == VK_SHADER_STAGE_VERTEX_BIT) p->vs = mod;
       else if (c.pStages[s].stage == VK_SHADER_STAGE_FRAGMENT_BIT) p->fs = mod;
       else missing("shader stage " + std::to_string(int(c.pStages[s].stage)));
-      if (c.pStages[s].pSpecializationInfo) missing("specialization constants (defaults used)");
     }
     if (c.pVertexInputState) {
       const auto* v = c.pVertexInputState;
@@ -1054,10 +1117,10 @@ VKAPI VkResult VKAPI_CALL jsnow_CreateGraphicsPipelines(VkDevice, VkPipelineCach
       if (c.pDepthStencilState->stencilTestEnable) missing("stencil test");
     }
     if (c.pColorBlendState && c.pColorBlendState->attachmentCount) {
-      p->blend = c.pColorBlendState->pAttachments[0];
-      p->hasBlend = true;
-      if (p->blend.blendEnable && (p->blend.colorBlendOp != VK_BLEND_OP_ADD || p->blend.alphaBlendOp != VK_BLEND_OP_ADD))
-        missing("blend ops other than ADD");
+      p->blends.assign(c.pColorBlendState->pAttachments, c.pColorBlendState->pAttachments + c.pColorBlendState->attachmentCount);
+      for (auto& b : p->blends)
+        if (b.blendEnable && (b.colorBlendOp != VK_BLEND_OP_ADD || b.alphaBlendOp != VK_BLEND_OP_ADD))
+          missing("blend ops other than ADD");
     }
     if (c.pViewportState) {
       if (c.pViewportState->pViewports) p->viewport = c.pViewportState->pViewports[0];
@@ -1398,6 +1461,105 @@ VKAPI VkResult VKAPI_CALL jsnow_QueuePresentKHR(VkQueue, const VkPresentInfoKHR*
   return VK_SUCCESS;
 }
 
+// --- remaining Vulkan 1.0 core: queries, indirect draws, events, buffer views, misc ---
+struct QueryPool { std::vector<std::atomic<uint64_t>> v; VkQueryType type; explicit QueryPool(uint32_t n) : v(n) {} };
+VKAPI VkResult VKAPI_CALL jsnow_CreateQueryPool(VkDevice, const VkQueryPoolCreateInfo* ci, const VkAllocationCallbacks*, VkQueryPool* out) {
+  auto* q = new QueryPool(ci->queryCount);
+  q->type = ci->queryType;
+  if (ci->queryType == VK_QUERY_TYPE_PIPELINE_STATISTICS) missing("pipeline statistics queries (report 0)");
+  *out = from<VkQueryPool>(q);
+  return VK_SUCCESS;
+}
+VKAPI void VKAPI_CALL jsnow_DestroyQueryPool(VkDevice, VkQueryPool q, const VkAllocationCallbacks*) { delete to<QueryPool>(q); }
+VKAPI VkResult VKAPI_CALL jsnow_GetQueryPoolResults(VkDevice, VkQueryPool qp, uint32_t first, uint32_t n, size_t, void* data, VkDeviceSize stride, VkQueryResultFlags flags) {
+  QueryPool* q = to<QueryPool>(qp);
+  for (uint32_t i = 0; i < n; ++i) {
+    const uint64_t v = q->v[first + i].load();
+    uint8_t* p = static_cast<uint8_t*>(data) + i * stride;
+    if (flags & VK_QUERY_RESULT_64_BIT) {
+      std::memcpy(p, &v, 8);
+      if (flags & VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) { const uint64_t one = 1; std::memcpy(p + 8, &one, 8); }
+    } else {
+      const uint32_t v32 = uint32_t(v);
+      std::memcpy(p, &v32, 4);
+      if (flags & VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) { const uint32_t one = 1; std::memcpy(p + 4, &one, 4); }
+    }
+  }
+  return VK_SUCCESS;
+}
+VKAPI void VKAPI_CALL jsnow_ResetQueryPool(VkDevice, VkQueryPool qp, uint32_t first, uint32_t n) {
+  for (uint32_t i = 0; i < n; ++i) to<QueryPool>(qp)->v[first + i] = 0;
+}
+VKAPI void VKAPI_CALL jsnow_CmdResetQueryPool(VkCommandBuffer c, VkQueryPool qp, uint32_t first, uint32_t n) {
+  QueryPool* q = to<QueryPool>(qp);
+  REC(c)([=](Exec&) { for (uint32_t i = 0; i < n; ++i) q->v[first + i] = 0; });
+}
+VKAPI void VKAPI_CALL jsnow_CmdBeginQuery(VkCommandBuffer c, VkQueryPool qp, uint32_t i, VkQueryControlFlags) {
+  QueryPool* q = to<QueryPool>(qp);
+  REC(c)([=](Exec& ex) { if (q->type == VK_QUERY_TYPE_OCCLUSION) { q->v[i] = 0; ex.query = &q->v[i]; } });
+}
+VKAPI void VKAPI_CALL jsnow_CmdEndQuery(VkCommandBuffer c, VkQueryPool, uint32_t) { REC(c)([](Exec& ex) { ex.query = nullptr; }); }
+VKAPI void VKAPI_CALL jsnow_CmdWriteTimestamp(VkCommandBuffer c, VkPipelineStageFlagBits, VkQueryPool qp, uint32_t i) {
+  QueryPool* q = to<QueryPool>(qp);
+  REC(c)([=](Exec&) {
+    q->v[i] = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+  });
+}
+VKAPI void VKAPI_CALL jsnow_CmdCopyQueryPoolResults(VkCommandBuffer c, VkQueryPool qp, uint32_t first, uint32_t n, VkBuffer b, VkDeviceSize off, VkDeviceSize stride, VkQueryResultFlags flags) {
+  REC(c)([=](Exec&) { jsnow_GetQueryPoolResults(nullptr, qp, first, n, 0, to<Buffer>(b)->ptr() + off, stride, flags); });
+}
+VKAPI void VKAPI_CALL jsnow_CmdDrawIndirect(VkCommandBuffer c, VkBuffer b, VkDeviceSize off, uint32_t n, uint32_t stride) {
+  Buffer* bb = to<Buffer>(b);
+  REC(c)([=](Exec& ex) {
+    for (uint32_t i = 0; i < n; ++i) {
+      VkDrawIndirectCommand d;
+      std::memcpy(&d, bb->ptr() + off + i * stride, sizeof d);
+      cmdDraw(ex, d.vertexCount, d.instanceCount, d.firstVertex, d.firstInstance, false, 0);
+    }
+  });
+}
+VKAPI void VKAPI_CALL jsnow_CmdDrawIndexedIndirect(VkCommandBuffer c, VkBuffer b, VkDeviceSize off, uint32_t n, uint32_t stride) {
+  Buffer* bb = to<Buffer>(b);
+  REC(c)([=](Exec& ex) {
+    for (uint32_t i = 0; i < n; ++i) {
+      VkDrawIndexedIndirectCommand d;
+      std::memcpy(&d, bb->ptr() + off + i * stride, sizeof d);
+      cmdDraw(ex, d.indexCount, d.instanceCount, d.firstIndex, d.firstInstance, true, d.vertexOffset);
+    }
+  });
+}
+VKAPI void VKAPI_CALL jsnow_CmdDispatchIndirect(VkCommandBuffer, VkBuffer, VkDeviceSize) { missing("vkCmdDispatchIndirect (compute)"); }
+VKAPI void VKAPI_CALL jsnow_CmdDispatchBase(VkCommandBuffer, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) { missing("vkCmdDispatchBase (compute)"); }
+struct Event { std::atomic<bool> set{false}; };
+VKAPI VkResult VKAPI_CALL jsnow_CreateEvent(VkDevice, const VkEventCreateInfo*, const VkAllocationCallbacks*, VkEvent* out) { *out = from<VkEvent>(new Event()); return VK_SUCCESS; }
+VKAPI void VKAPI_CALL jsnow_DestroyEvent(VkDevice, VkEvent e, const VkAllocationCallbacks*) { delete to<Event>(e); }
+VKAPI VkResult VKAPI_CALL jsnow_GetEventStatus(VkDevice, VkEvent e) { return to<Event>(e)->set ? VK_EVENT_SET : VK_EVENT_RESET; }
+VKAPI VkResult VKAPI_CALL jsnow_SetEvent(VkDevice, VkEvent e) { to<Event>(e)->set = true; return VK_SUCCESS; }
+VKAPI VkResult VKAPI_CALL jsnow_ResetEvent(VkDevice, VkEvent e) { to<Event>(e)->set = false; return VK_SUCCESS; }
+VKAPI void VKAPI_CALL jsnow_CmdSetEvent(VkCommandBuffer c, VkEvent e, VkPipelineStageFlags) { Event* ev = to<Event>(e); REC(c)([=](Exec&) { ev->set = true; }); }
+VKAPI void VKAPI_CALL jsnow_CmdResetEvent(VkCommandBuffer c, VkEvent e, VkPipelineStageFlags) { Event* ev = to<Event>(e); REC(c)([=](Exec&) { ev->set = false; }); }
+VKAPI void VKAPI_CALL jsnow_CmdWaitEvents(VkCommandBuffer, uint32_t, const VkEvent*, VkPipelineStageFlags, VkPipelineStageFlags, uint32_t, const VkMemoryBarrier*, uint32_t, const VkBufferMemoryBarrier*, uint32_t, const VkImageMemoryBarrier*) {}
+struct BufferView { Buffer* b; VkFormat f; };
+VKAPI VkResult VKAPI_CALL jsnow_CreateBufferView(VkDevice, const VkBufferViewCreateInfo* ci, const VkAllocationCallbacks*, VkBufferView* out) {
+  missing("texel buffers (views created, not readable from shaders)");
+  *out = from<VkBufferView>(new BufferView{to<Buffer>(ci->buffer), ci->format});
+  return VK_SUCCESS;
+}
+VKAPI void VKAPI_CALL jsnow_DestroyBufferView(VkDevice, VkBufferView v, const VkAllocationCallbacks*) { delete to<BufferView>(v); }
+VKAPI void VKAPI_CALL jsnow_CmdResolveImage(VkCommandBuffer c, VkImage s, VkImageLayout l1, VkImage d, VkImageLayout l2, uint32_t n, const VkImageResolve* r) {
+  std::vector<VkImageCopy> cp;  // single-sample "resolve" = copy
+  for (uint32_t i = 0; i < n; ++i) cp.push_back({r[i].srcSubresource, r[i].srcOffset, r[i].dstSubresource, r[i].dstOffset, r[i].extent});
+  jsnow_CmdCopyImage(c, s, l1, d, l2, n, cp.data());
+}
+VKAPI void VKAPI_CALL jsnow_CmdSetStencilCompareMask(VkCommandBuffer, VkStencilFaceFlags, uint32_t) {}
+VKAPI void VKAPI_CALL jsnow_CmdSetStencilWriteMask(VkCommandBuffer, VkStencilFaceFlags, uint32_t) {}
+VKAPI void VKAPI_CALL jsnow_CmdSetStencilReference(VkCommandBuffer, VkStencilFaceFlags, uint32_t) {}
+VKAPI void VKAPI_CALL jsnow_CmdSetDepthBounds(VkCommandBuffer, float, float) { missing("depth bounds test"); }
+VKAPI void VKAPI_CALL jsnow_GetRenderAreaGranularity(VkDevice, VkRenderPass, VkExtent2D* g) { *g = {1, 1}; }
+VKAPI VkResult VKAPI_CALL jsnow_MergePipelineCaches(VkDevice, VkPipelineCache, uint32_t, const VkPipelineCache*) { return VK_SUCCESS; }
+VKAPI void VKAPI_CALL jsnow_GetDeviceMemoryCommitment(VkDevice, VkDeviceMemory m, VkDeviceSize* c) { *c = to<Memory>(m)->size; }
+VKAPI VkResult VKAPI_CALL jsnow_QueueBindSparse(VkQueue, uint32_t, const VkBindSparseInfo*, VkFence) { missing("sparse binding"); return VK_ERROR_FEATURE_NOT_PRESENT; }
+
 // --- Vulkan 1.1 core (and the matching KHR aliases) ---
 VKAPI void VKAPI_CALL jsnow_GetPhysicalDeviceFeatures2(VkPhysicalDevice pd, VkPhysicalDeviceFeatures2* f) {
   jsnow_GetPhysicalDeviceFeatures(pd, &f->features);
@@ -1581,7 +1743,14 @@ static PFN_vkVoidFunction lookup(const char* name) {
       E(EnumeratePhysicalDeviceGroups), E(GetDeviceGroupPeerMemoryFeatures), E(CmdSetDeviceMask),
       E(GetDescriptorSetLayoutSupport), E(GetPhysicalDeviceExternalBufferProperties),
       E(GetPhysicalDeviceExternalFenceProperties), E(GetPhysicalDeviceExternalSemaphoreProperties),
-      E(CreateDescriptorUpdateTemplate), E(DestroyDescriptorUpdateTemplate), E(UpdateDescriptorSetWithTemplate)};
+      E(CreateDescriptorUpdateTemplate), E(DestroyDescriptorUpdateTemplate), E(UpdateDescriptorSetWithTemplate),
+      E(CreateQueryPool), E(DestroyQueryPool), E(GetQueryPoolResults), E(ResetQueryPool), E(CmdResetQueryPool),
+      E(CmdBeginQuery), E(CmdEndQuery), E(CmdWriteTimestamp), E(CmdCopyQueryPoolResults), E(CmdDrawIndirect),
+      E(CmdDrawIndexedIndirect), E(CmdDispatchIndirect), E(CmdDispatchBase), E(CreateEvent), E(DestroyEvent),
+      E(GetEventStatus), E(SetEvent), E(ResetEvent), E(CmdSetEvent), E(CmdResetEvent), E(CmdWaitEvents),
+      E(CreateBufferView), E(DestroyBufferView), E(CmdResolveImage), E(CmdSetStencilCompareMask),
+      E(CmdSetStencilWriteMask), E(CmdSetStencilReference), E(CmdSetDepthBounds), E(GetRenderAreaGranularity),
+      E(MergePipelineCaches), E(GetDeviceMemoryCommitment), E(QueueBindSparse)};
 #undef E
   auto it = table.find(name);
   if (it != table.end()) return it->second;
