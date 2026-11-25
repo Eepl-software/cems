@@ -22,7 +22,11 @@ enum Op : uint16_t {
   OpCompositeExtract = 81, OpCompositeInsert = 82, OpCopyObject = 83, OpTranspose = 84, OpSampledImage = 86,
   OpImageSampleImplicitLod = 87, OpImageSampleExplicitLod = 88, OpImageSampleDrefImplicitLod = 89,
   OpImageSampleDrefExplicitLod = 90, OpImageFetch = 95, OpImage = 100, OpImageQuerySizeLod = 103,
-  OpImageQuerySize = 104, OpImageQueryLevels = 106,
+  OpImageQuerySize = 104, OpImageQueryLevels = 106, OpImageRead = 98, OpImageWrite = 99,
+  OpControlBarrier = 224, OpMemoryBarrier = 225, OpAtomicLoad = 227, OpAtomicStore = 228, OpAtomicExchange = 229,
+  OpAtomicCompareExchange = 230, OpAtomicIIncrement = 232, OpAtomicIDecrement = 233, OpAtomicIAdd = 234,
+  OpAtomicISub = 235, OpAtomicSMin = 236, OpAtomicUMin = 237, OpAtomicSMax = 238, OpAtomicUMax = 239,
+  OpAtomicAnd = 240, OpAtomicOr = 241, OpAtomicXor = 242,
   OpConvertFToU = 109, OpConvertFToS = 110, OpConvertSToF = 111, OpConvertUToF = 112, OpUConvert = 113,
   OpSConvert = 114, OpFConvert = 115, OpBitcast = 124, OpSNegate = 126, OpFNegate = 127, OpIAdd = 128,
   OpFAdd = 129, OpISub = 130, OpFSub = 131, OpIMul = 132, OpFMul = 133, OpUDiv = 134, OpSDiv = 135, OpFDiv = 136,
@@ -126,6 +130,9 @@ std::shared_ptr<Module> Module::parse(const uint32_t* w, size_t count, std::stri
         break;
       }
       case OpDecorate: dec[a[0]].push_back({a[1], wc > 3 ? a[2] : 0}); break;
+      case OpExecutionMode:
+        if (a[1] == 17 && wc >= 6) { m->localSize[0] = a[2]; m->localSize[1] = a[3]; m->localSize[2] = a[4]; }
+        break;
       case OpMemberDecorate: mdec[{a[0], a[1]}].push_back({a[2], wc > 4 ? a[3] : 0}); break;
       case OpTypeVoid: m->types[a[0]].kind = Kind::Void; break;
       case OpTypeBool: m->types[a[0]].kind = Kind::Bool; break;
@@ -227,6 +234,9 @@ std::shared_ptr<Module> Module::parse(const uint32_t* w, size_t count, std::stri
       case OpCompositeConstruct: case OpCompositeExtract: case OpCompositeInsert: case OpCopyObject: case OpTranspose:
       case OpSampledImage: case OpImageSampleImplicitLod: case OpImageSampleExplicitLod: case OpImageFetch:
       case OpImageSampleDrefImplicitLod: case OpImageSampleDrefExplicitLod: case OpImageQuerySizeLod:
+      case OpImageRead: case OpAtomicLoad: case OpAtomicExchange: case OpAtomicCompareExchange:
+      case OpAtomicIIncrement: case OpAtomicIDecrement: case OpAtomicIAdd: case OpAtomicISub: case OpAtomicSMin:
+      case OpAtomicUMin: case OpAtomicSMax: case OpAtomicUMax: case OpAtomicAnd: case OpAtomicOr: case OpAtomicXor:
       case OpImageQuerySize: case OpImageQueryLevels:
       case OpImage: case OpPhi: case OpUndef: case OpSelect:
         m->resultType[a[1]] = a[0];
@@ -470,6 +480,85 @@ float sampleTexture(const Texture& tx, float s, float t, float lod, int ch) {
   const float top = a + (b - a) * ax, bot = c + (d - c) * ax;
   return top + (bot - top) * ay;
 }
+// Raw texel access for imageLoad/imageStore/texelFetch. Values are float bits for
+// normalized/float formats and integer bits for integer formats.
+inline float h2f(uint16_t h) {
+  const uint32_t sgn = (h >> 15) & 1, e = (h >> 10) & 31, mnt = h & 1023;
+  const float r = e == 0 ? std::ldexp(float(mnt), -24) : e == 31 ? (mnt ? NAN : INFINITY) : std::ldexp(float(mnt | 1024), int(e) - 25);
+  return sgn ? -r : r;
+}
+inline uint16_t f2h(float fv) {
+  uint32_t x; std::memcpy(&x, &fv, 4);
+  const uint32_t sgn = (x >> 16) & 0x8000;
+  int e = int((x >> 23) & 0xFF) - 112;
+  uint32_t mnt = x & 0x7FFFFF;
+  if (e >= 31) return uint16_t(sgn | 0x7C00);
+  if (e <= 0) { if (e < -10) return uint16_t(sgn); mnt |= 0x800000; return uint16_t(sgn | (mnt >> (14 - e))); }
+  return uint16_t(sgn | (e << 10) | (mnt >> 13));
+}
+int texelSize(int fmt) {
+  switch (fmt) {
+    case 2: case 12: return 16;
+    case 7: case 13: return 8;
+    case 6: return 1;
+    case 8: case 14: return 2;
+    default: return 4;
+  }
+}
+const uint8_t* texelPtr(const Texture& tx, int x, int y) {
+  if (x < 0 || y < 0 || x >= tx.width || y >= tx.height) return nullptr;
+  return tx.data + tx.levelOffset[0] + size_t(y) * tx.levelPitch[0] + size_t(x) * texelSize(tx.format);
+}
+void readTexel(const Texture& tx, int x, int y, uint32_t out[4]) {
+  float fv[4] = {0, 0, 0, 1};
+  const uint8_t* p = texelPtr(tx, x, y);
+  out[0] = out[1] = out[2] = 0; out[3] = u(1.0f);
+  if (!p) return;
+  switch (tx.format) {
+    case 10: case 11: std::memcpy(out, p, 4); out[1] = out[2] = 0; out[3] = 1; return;
+    case 12: std::memcpy(out, p, 16); return;
+    case 2: std::memcpy(fv, p, 16); break;
+    case 9: std::memcpy(fv, p, 4); break;
+    case 13: std::memcpy(fv, p, 8); break;
+    case 7: for (int c = 0; c < 4; ++c) { uint16_t h; std::memcpy(&h, p + 2 * c, 2); fv[c] = h2f(h); } break;
+    case 14: { uint16_t h; std::memcpy(&h, p, 2); fv[0] = h2f(h); break; }
+    case 15: for (int c = 0; c < 2; ++c) { uint16_t h; std::memcpy(&h, p + 2 * c, 2); fv[c] = h2f(h); } break;
+    case 6: fv[0] = p[0] / 255.0f; break;
+    case 8: fv[0] = p[0] / 255.0f; fv[1] = p[1] / 255.0f; break;
+    case 1: fv[0] = p[2] / 255.0f; fv[1] = p[1] / 255.0f; fv[2] = p[0] / 255.0f; fv[3] = p[3] / 255.0f; break;
+    case 16: { uint32_t v; std::memcpy(&v, p, 4); for (int c = 0; c < 3; ++c) fv[c] = ((v >> (10 * c)) & 1023) / 1023.0f; fv[3] = (v >> 30) / 3.0f; break; }
+    default: for (int c = 0; c < 4; ++c) fv[c] = p[c] / 255.0f; break;
+  }
+  for (int c = 0; c < 4; ++c) out[c] = u(fv[c]);
+}
+void writeTexel(const Texture& tx, int x, int y, const uint32_t in[4]) {
+  uint8_t* p = const_cast<uint8_t*>(texelPtr(tx, x, y));
+  if (!p) return;
+  float fv[4];
+  for (int c = 0; c < 4; ++c) fv[c] = f(in[c]);
+  auto q = [](float v) { return uint8_t(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
+  switch (tx.format) {
+    case 10: case 11: std::memcpy(p, in, 4); break;
+    case 12: std::memcpy(p, in, 16); break;
+    case 2: std::memcpy(p, fv, 16); break;
+    case 9: std::memcpy(p, fv, 4); break;
+    case 13: std::memcpy(p, fv, 8); break;
+    case 7: for (int c = 0; c < 4; ++c) { const uint16_t h = f2h(fv[c]); std::memcpy(p + 2 * c, &h, 2); } break;
+    case 14: { const uint16_t h = f2h(fv[0]); std::memcpy(p, &h, 2); break; }
+    case 15: for (int c = 0; c < 2; ++c) { const uint16_t h = f2h(fv[c]); std::memcpy(p + 2 * c, &h, 2); } break;
+    case 6: p[0] = q(fv[0]); break;
+    case 8: p[0] = q(fv[0]); p[1] = q(fv[1]); break;
+    case 1: p[0] = q(fv[2]); p[1] = q(fv[1]); p[2] = q(fv[0]); p[3] = q(fv[3]); break;
+    case 16: {
+      uint32_t v = 0;
+      for (int c = 0; c < 3; ++c) v |= uint32_t(std::clamp(fv[c], 0.0f, 1.0f) * 1023.0f + 0.5f) << (10 * c);
+      v |= uint32_t(std::clamp(fv[3], 0.0f, 1.0f) * 3.0f + 0.5f) << 30;
+      std::memcpy(p, &v, 4);
+      break;
+    }
+    default: for (int c = 0; c < 4; ++c) p[c] = q(fv[c]); break;
+  }
+}
 }  // namespace
 
 bool Invocation::exec(const Resources& res, uint8_t mask0, bool scalar, int lane) {
@@ -636,9 +725,19 @@ bool Invocation::exec(const Resources& res, uint8_t mask0, bool scalar, int lane
         const Ptr& p = ptr_[a[0]];
         const auto& v = val_[a[1]];
         const Variable* var = m.isVar[p.var] ? &m.vars[p.var] : nullptr;
-        if (var && (isBufferStorage(var->storage) || var->storage == UniformConstant)) {
-          error = "store to buffer memory not supported";
+        if (var && var->storage == UniformConstant) {
+          error = "store to UniformConstant";
           return false;
+        }
+        if (var && isBufferStorage(var->storage)) {  // storage buffer write
+          uint8_t* base = const_cast<uint8_t*>(var->storage == PushConstant ? res.pushConstants : res.buffer(var->set, var->binding));
+          if (!base) break;
+          std::vector<uint32_t> offs;
+          layout(m, p.type, 0, p.matrixStride, p.rowMajor, offs);
+          for (size_t k = 0; k < offs.size(); ++k)
+            for (int l = 0; l < L; ++l)
+              if (mask & (1 << l)) std::memcpy(base + p.off[l] + offs[k], &v[k * L + l], 4);
+          break;
         }
         auto& s = storage_[p.var];
         const uint32_t c = m.types[p.type].comps;
@@ -752,6 +851,99 @@ bool Invocation::exec(const Resources& res, uint8_t mask0, bool scalar, int lane
             v[size_t(ch) * L + l] = u(tx ? sampleTexture(*tx, f(c[l]), f(c[L + l]), lodv[l], ch) : (ch == 3 ? 1.0f : 0.0f));
         break;
       }
+      case OpControlBarrier: case OpMemoryBarrier: break;  // invocations run independently (no shared memory)
+      case OpImageRead: case OpImageFetch: {
+        auto& v = ensure(a[1]);
+        const Variable& var = m.vars[val_[a[2]][0]];
+        const Texture* tx = res.texture(var.set, var.binding);
+        const auto& c = val_[a[3]];
+        const bool subpass = c.size() == size_t(2 * L) && tx && !tx->isBuffer && in.op == OpImageRead &&
+                             m.types[m.resultType[a[2]]].kind == Kind::Image && false;
+        (void)subpass;
+        const uint32_t nc = comps(a[1]);
+        const size_t cc = c.size() / L;
+        for (int l = 0; l < L; ++l) {
+          uint32_t t4[4] = {0, 0, 0, 0};
+          if (tx) {
+            int x = int32_t(c[l]), y = cc > 1 ? int32_t(c[L + l]) : 0;
+            if (tx->isSubpass) { x += fragX[l]; y += fragY[l]; }
+            readTexel(*tx, x, y, t4);
+          }
+          for (uint32_t k = 0; k < nc && k < 4; ++k) v[k * L + l] = t4[k];
+        }
+        break;
+      }
+      case OpImageWrite: {
+        const Variable& var = m.vars[val_[a[0]][0]];
+        const Texture* tx = res.texture(var.set, var.binding);
+        const auto& c = val_[a[1]];
+        const auto& t = val_[a[2]];
+        const size_t cc = c.size() / L, tc = t.size() / L;
+        if (tx)
+          for (int l = 0; l < L; ++l)
+            if (mask & (1 << l)) {
+              uint32_t t4[4] = {0, 0, 0, u(1.0f)};
+              for (size_t k = 0; k < tc && k < 4; ++k) t4[k] = t[k * L + l];
+              writeTexel(*tx, int32_t(c[l]), cc > 1 ? int32_t(c[L + l]) : 0, t4);
+            }
+        break;
+      }
+      case OpAtomicLoad: case OpAtomicStore: case OpAtomicExchange: case OpAtomicCompareExchange:
+      case OpAtomicIIncrement: case OpAtomicIDecrement: case OpAtomicIAdd: case OpAtomicISub: case OpAtomicSMin:
+      case OpAtomicUMin: case OpAtomicSMax: case OpAtomicUMax: case OpAtomicAnd: case OpAtomicOr: case OpAtomicXor: {
+        const bool isStore = in.op == OpAtomicStore;
+        const uint32_t ptrId = isStore ? a[0] : a[2];
+        const Ptr& p = ptr_[ptrId];
+        const Variable* var = m.isVar[p.var] ? &m.vars[p.var] : nullptr;
+        std::vector<uint32_t>* rv = isStore ? nullptr : &ensure(a[1]);
+        for (int l = 0; l < L; ++l) {
+          if (!(mask & (1 << l))) continue;
+          uint32_t* addr;
+          if (var && isBufferStorage(var->storage)) {
+            uint8_t* base = const_cast<uint8_t*>(res.buffer(var->set, var->binding));
+            if (!base) continue;
+            addr = reinterpret_cast<uint32_t*>(base + p.off[l]);
+          } else {
+            addr = &storage_[p.var][size_t(p.off[l]) * L + l];
+          }
+          auto opnd = [&](int idx) { return val_[a[idx]][l]; };
+          uint32_t old = 0;
+          switch (in.op) {
+            case OpAtomicLoad: old = __atomic_load_n(addr, __ATOMIC_SEQ_CST); break;
+            case OpAtomicStore: __atomic_store_n(addr, val_[a[3]][l], __ATOMIC_SEQ_CST); break;
+            case OpAtomicExchange: old = __atomic_exchange_n(addr, opnd(5), __ATOMIC_SEQ_CST); break;
+            case OpAtomicCompareExchange: {
+              uint32_t expected = opnd(7);
+              __atomic_compare_exchange_n(addr, &expected, opnd(6), false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+              old = expected;
+              break;
+            }
+            case OpAtomicIIncrement: old = __atomic_fetch_add(addr, 1u, __ATOMIC_SEQ_CST); break;
+            case OpAtomicIDecrement: old = __atomic_fetch_sub(addr, 1u, __ATOMIC_SEQ_CST); break;
+            case OpAtomicIAdd: old = __atomic_fetch_add(addr, opnd(5), __ATOMIC_SEQ_CST); break;
+            case OpAtomicISub: old = __atomic_fetch_sub(addr, opnd(5), __ATOMIC_SEQ_CST); break;
+            case OpAtomicAnd: old = __atomic_fetch_and(addr, opnd(5), __ATOMIC_SEQ_CST); break;
+            case OpAtomicOr: old = __atomic_fetch_or(addr, opnd(5), __ATOMIC_SEQ_CST); break;
+            case OpAtomicXor: old = __atomic_fetch_xor(addr, opnd(5), __ATOMIC_SEQ_CST); break;
+            default: {  // min / max via CAS
+              uint32_t cur = __atomic_load_n(addr, __ATOMIC_SEQ_CST), nv;
+              do {
+                const uint32_t x = opnd(5);
+                switch (in.op) {
+                  case OpAtomicSMin: nv = uint32_t(std::min(int32_t(cur), int32_t(x))); break;
+                  case OpAtomicSMax: nv = uint32_t(std::max(int32_t(cur), int32_t(x))); break;
+                  case OpAtomicUMin: nv = std::min(cur, x); break;
+                  default: nv = std::max(cur, x); break;
+                }
+              } while (!__atomic_compare_exchange_n(addr, &cur, nv, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
+              old = cur;
+              break;
+            }
+          }
+          if (rv) (*rv)[l] = old;
+        }
+        break;
+      }
       case OpImageQuerySizeLod: case OpImageQuerySize: case OpImageQueryLevels: {
         auto& v = ensure(a[1]);
         const Variable& var = m.vars[val_[a[2]][0]];
@@ -763,6 +955,7 @@ bool Invocation::exec(const Resources& res, uint8_t mask0, bool scalar, int lane
           const uint32_t w2 = tx ? uint32_t(std::max(1, tx->width >> lod)) : 1, h2 = tx ? uint32_t(std::max(1, tx->height >> lod)) : 1;
           v[l] = w2;
           if (c > 1) v[L + l] = h2;
+          if (tx && tx->isBuffer) v[l] = uint32_t(tx->width);
           for (uint32_t k = 2; k < c; ++k) v[k * L + l] = 1;
         }
         break;

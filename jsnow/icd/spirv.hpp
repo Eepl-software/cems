@@ -44,11 +44,14 @@ struct Texture {
   int width = 0, height = 0, levels = 1;
   std::vector<size_t> levelOffset;
   std::vector<int> levelPitch;  // bytes per row
-  int format = 0;  // 0 RGBA8, 1 BGRA8, 2 RGBA32F, 3 D16, 4 D32F, 5 D24S8, 6 R8, 7 RGBA16F, 8 RG8
+  int format = 0;  // 0 RGBA8, 1 BGRA8, 2 RGBA32F, 3 D16, 4 D32F, 5 D24S8, 6 R8, 7 RGBA16F, 8 RG8,
+                   // 9 R32F, 10 R32UI, 11 R32SI, 12 RGBA32UI, 13 RG32F, 14 R16F, 15 RG16F, 16 A2B10G10R10, 17 B10G11R11F
   bool linear = true;           // mag/min filter
   bool mipLinear = false;
   int addressU = 0, addressV = 0;  // 0 repeat, 1 mirrored repeat, 2 clamp to edge
   bool compare = false;            // depth-compare sampler
+  bool isBuffer = false;           // texel buffer (width = elements)
+  bool isSubpass = false;          // input attachment: coordinates are relative to the fragment
   int compareOp = 3;               // VkCompareOp (default LESS_OR_EQUAL)
   float borderOne = 1.0f;          // border value for clamp-to-border depth lookups
 };
@@ -72,6 +75,7 @@ class Invocation {
   const float* output(uint32_t var) const { return reinterpret_cast<const float*>(storage_[var].data()); }
   void run(const Resources& res, uint8_t activeMask = 0xFF);
   uint8_t killed() const { return killed_; }
+  int32_t fragX[8] = {}, fragY[8] = {};  // pixel of each lane (subpass inputs)
   std::string error;
 
  private:
@@ -101,7 +105,8 @@ class Module {
   // Entry point selection (by name).
   bool select(const std::string& entry);
   uint32_t entryFunction = 0;
-  int executionModel = -1;  // 0 vertex, 4 fragment
+  int executionModel = -1;  // 0 vertex, 4 fragment, 5 compute
+  uint32_t localSize[3] = {1, 1, 1};
   std::vector<uint32_t> interfaceVars;
   std::vector<Type> types;  // by id
   std::vector<Variable> vars;  // by id (id == 0: none)

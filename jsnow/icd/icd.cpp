@@ -124,16 +124,21 @@ struct Descriptor {
   spv::Texture tex;  // prepared on update
 };
 struct DescriptorSet { std::vector<Descriptor> b; };
+struct BufferView { Buffer* b; VkFormat f; VkDeviceSize offset, range; };
 struct DescriptorPool { std::vector<DescriptorSet*> sets; };
 struct PipelineLayout { std::vector<DescriptorSetLayout*> sets; };
+struct Subpass {
+  std::vector<uint32_t> color, input;  // attachment indices
+  int depth = -1;
+};
 struct RenderPass {
   std::vector<VkAttachmentDescription> att;
-  std::vector<uint32_t> color;  // attachment indices of subpass 0
-  int depth = -1;
+  std::vector<Subpass> sub;
 };
 struct Framebuffer { std::vector<ImageView*> views; uint32_t w, h; };
 struct Pipeline {
-  std::shared_ptr<spv::Module> vs, fs;
+  std::shared_ptr<spv::Module> vs, fs, cs;
+  uint32_t subpass = 0;
   std::vector<VkVertexInputBindingDescription> bindings;
   std::vector<VkVertexInputAttributeDescription> attrs;
   VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -174,8 +179,13 @@ struct Exec : spv::Resources {
   Framebuffer* fb = nullptr;
   VkRect2D area{};
   Pipeline* pipe = nullptr;
-  DescriptorSet* sets[8] = {};
+  DescriptorSet* sets[8] = {};  // graphics bind point
   std::vector<uint32_t> dynOffsets[8];
+  DescriptorSet* csets[8] = {};  // compute bind point
+  std::vector<uint32_t> cdynOffsets[8];
+  Pipeline* cpipe = nullptr;
+  bool computeMode = false;  // resource lookups use the compute bind point
+  uint32_t subpass = 0;
   struct VB { Buffer* b = nullptr; VkDeviceSize off = 0; } vbs[16];
   Buffer* ib = nullptr;
   VkDeviceSize ibOff = 0;
@@ -185,6 +195,8 @@ struct Exec : spv::Resources {
   uint8_t push[256] = {};
   std::atomic<uint64_t>* query = nullptr;  // active occlusion query (samples passed)
   const uint8_t* buffer(int set, int binding) const override {
+    DescriptorSet* const* sets = computeMode ? csets : this->sets;
+    const std::vector<uint32_t>* dynOffsets = computeMode ? cdynOffsets : this->dynOffsets;
     if (set < 0 || set >= 8 || !sets[set] || binding < 0 || size_t(binding) >= sets[set]->b.size()) return nullptr;
     const Descriptor& d = sets[set]->b[binding];
     if (!d.buf) return nullptr;
@@ -201,14 +213,30 @@ struct Exec : spv::Resources {
     return d.buf->ptr() + off;
   }
   const spv::Texture* texture(int set, int binding) const override {
+    DescriptorSet* const* sets = computeMode ? csets : this->sets;
     if (set < 0 || set >= 8 || !sets[set] || binding < 0 || size_t(binding) >= sets[set]->b.size()) return nullptr;
     const Descriptor& d = sets[set]->b[binding];
-    return d.view ? &d.tex : nullptr;
+    return d.tex.data ? &d.tex : nullptr;
   }
 };
 
+int texFormatCode(VkFormat f);
+void prepareTexelBuffer(Descriptor& d, BufferView* v) {
+  spv::Texture& t = d.tex;
+  Descriptor tmp;  // reuse the format table of prepareTexture
+  t.isBuffer = true;
+  t.data = v->b->ptr() + v->offset;
+  t.levels = 1;
+  t.levelOffset.assign(1, 0);
+  t.levelPitch.assign(1, int(v->range));
+  t.format = texFormatCode(v->f);
+  const int bpp = std::max(1, formatSize(v->f));
+  t.width = int(v->range / bpp);
+  t.height = 1;
+}
 void prepareTexture(Descriptor& d) {
   if (!d.view) return;
+  d.tex.isSubpass = d.type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
   Image* im = d.view->img;
   spv::Texture& t = d.tex;
   t.data = im->base() + d.view->baseLayer * im->layerSize;
@@ -231,6 +259,14 @@ void prepareTexture(Descriptor& d) {
     case VK_FORMAT_R16G16B16A16_SFLOAT: t.format = 7; break;
     case VK_FORMAT_R8G8_UNORM: t.format = 8; break;
     case VK_FORMAT_R8G8B8A8_UNORM: case VK_FORMAT_R8G8B8A8_SRGB: t.format = 0; break;
+    case VK_FORMAT_R32_SFLOAT: t.format = 9; break;
+    case VK_FORMAT_R32_UINT: t.format = 10; break;
+    case VK_FORMAT_R32_SINT: t.format = 11; break;
+    case VK_FORMAT_R32G32B32A32_UINT: case VK_FORMAT_R32G32B32A32_SINT: t.format = 12; break;
+    case VK_FORMAT_R32G32_SFLOAT: t.format = 13; break;
+    case VK_FORMAT_R16_SFLOAT: t.format = 14; break;
+    case VK_FORMAT_R16G16_SFLOAT: t.format = 15; break;
+    case VK_FORMAT_A2B10G10R10_UNORM_PACK32: t.format = 16; break;
     default: t.format = 0; missing("texture format " + std::to_string(int(f)));
   }
   if (d.sampler) {
@@ -261,6 +297,24 @@ inline float fromHalf(uint16_t h) {
   const uint32_t sgn = (h >> 15) & 1, e = (h >> 10) & 31, mnt = h & 1023;
   const float r = e == 0 ? std::ldexp(float(mnt), -24) : e == 31 ? (mnt ? NAN : INFINITY) : std::ldexp(float(mnt | 1024), int(e) - 25);
   return sgn ? -r : r;
+}
+int texFormatCode(VkFormat f) {
+  switch (f) {
+    case VK_FORMAT_B8G8R8A8_UNORM: case VK_FORMAT_B8G8R8A8_SRGB: return 1;
+    case VK_FORMAT_R32G32B32A32_SFLOAT: return 2;
+    case VK_FORMAT_R8_UNORM: return 6;
+    case VK_FORMAT_R16G16B16A16_SFLOAT: return 7;
+    case VK_FORMAT_R8G8_UNORM: return 8;
+    case VK_FORMAT_R32_SFLOAT: return 9;
+    case VK_FORMAT_R32_UINT: return 10;
+    case VK_FORMAT_R32_SINT: return 11;
+    case VK_FORMAT_R32G32B32A32_UINT: case VK_FORMAT_R32G32B32A32_SINT: return 12;
+    case VK_FORMAT_R32G32_SFLOAT: return 13;
+    case VK_FORMAT_R16_SFLOAT: return 14;
+    case VK_FORMAT_R16G16_SFLOAT: return 15;
+    case VK_FORMAT_A2B10G10R10_UNORM_PACK32: return 16;
+    default: return 0;
+  }
 }
 // Colour / depth attachment access.
 void writeColor(VkFormat f, uint8_t* p, const float c[4]) {
@@ -560,7 +614,8 @@ void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t instanc
   struct RasterTimer { sclk::time_point t; ~RasterTimer() { gStats.fsNs += nsSince(t); } } rasterTimer{tRaster};
   // ---- rasterization: horizontal bands per thread, 4x2 pixel blocks ----
   RenderPass& rp = *ex.rp;
-  ImageView* depthView = rp.depth >= 0 ? ex.fb->views[rp.depth] : nullptr;
+  const Subpass& sp = rp.sub[std::min<size_t>(ex.subpass, rp.sub.size() - 1)];
+  ImageView* depthView = sp.depth >= 0 ? ex.fb->views[sp.depth] : nullptr;
   int x0 = std::max<int>(ex.area.offset.x, sc.offset.x), y0 = std::max<int>(ex.area.offset.y, sc.offset.y);
   int x1 = std::min<int>(ex.area.offset.x + int(ex.area.extent.width), sc.offset.x + int(sc.extent.width));
   int y1 = std::min<int>(ex.area.offset.y + int(ex.area.extent.height), sc.offset.y + int(sc.extent.height));
@@ -645,6 +700,7 @@ void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t instanc
             for (int l = 0; l < 8; ++l) ff[l] = t.front;
           }
           ++gStats.frags;
+          for (int l = 0; l < 8; ++l) { inv.fragX[l] = x + (l & 3); inv.fragY[l] = y + (l >> 2); }
           inv.run(ex, 0xFF);  // helper lanes run too (derivatives)
           if (!inv.error.empty()) { missing("fragment shader: " + inv.error); return; }
           pass &= uint8_t(~inv.killed());
@@ -656,8 +712,8 @@ void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t instanc
             if (depthView && P.depthWrite)
               writeDepth(depthView->format, depthView->img->at(0, depthView->baseLayer, X, Y), z[l]);
             for (auto& fo : fsOut) {  // one output per colour attachment (by location)
-              if (fo.first < 0 || size_t(fo.first) >= rp.color.size() || rp.color[fo.first] == VK_ATTACHMENT_UNUSED) continue;
-              ImageView* cv = ex.fb->views[rp.color[fo.first]];
+              if (fo.first < 0 || size_t(fo.first) >= sp.color.size() || sp.color[fo.first] == VK_ATTACHMENT_UNUSED) continue;
+              ImageView* cv = ex.fb->views[sp.color[fo.first]];
               const uint32_t nc = fs.types[fs.vars[fo.second].type].comps;
               float c[4] = {0, 0, 0, 1};
               for (uint32_t ch = 0; ch < std::min(nc, 4u); ++ch) c[ch] = inv.output(fo.second)[ch * 8 + l];
@@ -1101,6 +1157,13 @@ VKAPI void VKAPI_CALL jsnow_UpdateDescriptorSets(VkDevice, uint32_t nw, const Vk
           if (d.type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) missing("separate images/samplers (bound per binding only)");
           prepareTexture(d);
           break;
+        case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE: case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
+          d.view = to<ImageView>(w[i].pImageInfo[k].imageView);
+          prepareTexture(d);
+          break;
+        case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER: case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
+          if (w[i].pTexelBufferView && w[i].pTexelBufferView[k]) prepareTexelBuffer(d, to<BufferView>(w[i].pTexelBufferView[k]));
+          break;
         default: missing("descriptor type " + std::to_string(int(d.type))); break;
       }
     }
@@ -1118,11 +1181,16 @@ VKAPI void VKAPI_CALL jsnow_UpdateDescriptorSets(VkDevice, uint32_t nw, const Vk
 VKAPI VkResult VKAPI_CALL jsnow_CreateRenderPass(VkDevice, const VkRenderPassCreateInfo* ci, const VkAllocationCallbacks*, VkRenderPass* out) {
   auto* rp = new RenderPass();
   rp->att.assign(ci->pAttachments, ci->pAttachments + ci->attachmentCount);
-  if (ci->subpassCount > 1) missing("multiple subpasses");
-  const VkSubpassDescription& s = ci->pSubpasses[0];
-  for (uint32_t i = 0; i < s.colorAttachmentCount; ++i) rp->color.push_back(s.pColorAttachments[i].attachment);
-  if (s.pDepthStencilAttachment && s.pDepthStencilAttachment->attachment != VK_ATTACHMENT_UNUSED)
-    rp->depth = int(s.pDepthStencilAttachment->attachment);
+  for (uint32_t si = 0; si < ci->subpassCount; ++si) {
+    const VkSubpassDescription& s = ci->pSubpasses[si];
+    Subpass sp;
+    for (uint32_t i = 0; i < s.colorAttachmentCount; ++i) sp.color.push_back(s.pColorAttachments[i].attachment);
+    for (uint32_t i = 0; i < s.inputAttachmentCount; ++i) sp.input.push_back(s.pInputAttachments[i].attachment);
+    if (s.pDepthStencilAttachment && s.pDepthStencilAttachment->attachment != VK_ATTACHMENT_UNUSED)
+      sp.depth = int(s.pDepthStencilAttachment->attachment);
+    if (s.pResolveAttachments) missing("resolve attachments (single-sampled: ignored)");
+    rp->sub.push_back(sp);
+  }
   *out = from<VkRenderPass>(rp);
   return VK_SUCCESS;
 }
@@ -1193,10 +1261,75 @@ VKAPI VkResult VKAPI_CALL jsnow_CreateGraphicsPipelines(VkDevice, VkPipelineCach
   }
   return VK_SUCCESS;
 }
-VKAPI VkResult VKAPI_CALL jsnow_CreateComputePipelines(VkDevice, VkPipelineCache, uint32_t n, const VkComputePipelineCreateInfo*, const VkAllocationCallbacks*, VkPipeline* out) {
-  missing("compute pipelines");
-  for (uint32_t i = 0; i < n; ++i) out[i] = VK_NULL_HANDLE;
-  return VK_ERROR_FEATURE_NOT_PRESENT;
+VKAPI VkResult VKAPI_CALL jsnow_CreateComputePipelines(VkDevice, VkPipelineCache, uint32_t n, const VkComputePipelineCreateInfo* ci, const VkAllocationCallbacks*, VkPipeline* out) {
+  for (uint32_t i = 0; i < n; ++i) {
+    auto* p = new Pipeline();
+    auto mod = to<ShaderModule>(ci[i].stage.module)->mod;
+    if (const VkSpecializationInfo* si = ci[i].stage.pSpecializationInfo) {
+      auto copy = std::make_shared<spv::Module>(*mod);
+      std::vector<std::array<uint32_t, 3>> entries;
+      for (uint32_t k = 0; k < si->mapEntryCount; ++k)
+        entries.push_back({si->pMapEntries[k].constantID, si->pMapEntries[k].offset, uint32_t(si->pMapEntries[k].size)});
+      copy->specialize(entries, static_cast<const uint8_t*>(si->pData));
+      mod = copy;
+    }
+    p->cs = mod;
+    out[i] = from<VkPipeline>(p);
+  }
+  return VK_SUCCESS;
+}
+
+// Compute dispatch: invocations of a workgroup are independent (barriers and
+// shared memory are not supported), so they run in 8-lane batches, workgroups in parallel.
+void cmdDispatch(Exec& ex, uint32_t gx, uint32_t gy, uint32_t gz, uint32_t bx, uint32_t by, uint32_t bz) {
+  if (!ex.cpipe || !ex.cpipe->cs) return;
+  const spv::Module& cs = *ex.cpipe->cs;
+  const uint32_t lx = cs.localSize[0], ly = cs.localSize[1], lz = cs.localSize[2];
+  const uint32_t local = lx * ly * lz;
+  const int gid = cs.findBuiltinInput(28), lid = cs.findBuiltinInput(27), wid = cs.findBuiltinInput(26);
+  const int nwg = cs.findBuiltinInput(24), lix = cs.findBuiltinInput(29);
+  const uint64_t groups = uint64_t(gx) * gy * gz;
+  if (!groups) return;
+  ex.computeMode = true;
+  std::vector<std::unique_ptr<spv::Invocation>> invs(ex.dev->pool->size());
+  const int tasks = int(std::min<uint64_t>(groups, 4096));
+  std::atomic<bool> failed{false};
+  ex.dev->pool->run(tasks, [&](int task, int tid) {
+    if (failed) return;
+    if (!invs[tid]) invs[tid] = std::make_unique<spv::Invocation>(cs);
+    spv::Invocation& inv = *invs[tid];
+    const uint64_t g0 = groups * task / tasks, g1 = groups * (task + 1) / tasks;
+    for (uint64_t g = g0; g < g1; ++g) {
+      const uint32_t wx = uint32_t(g % gx) + bx, wy = uint32_t((g / gx) % gy) + by, wz = uint32_t(g / (uint64_t(gx) * gy)) + bz;
+      for (uint32_t base = 0; base < local; base += 8) {
+        uint8_t mask = 0;
+        auto set3 = [&](int var, auto fn) {
+          if (var < 0) return;
+          uint32_t* v = reinterpret_cast<uint32_t*>(inv.input(uint32_t(var)));
+          for (int l = 0; l < 8; ++l) {
+            const uint32_t li = std::min(base + l, local - 1);
+            uint32_t xyz[3];
+            fn(li, xyz);
+            v[l] = xyz[0]; v[8 + l] = xyz[1]; v[16 + l] = xyz[2];
+          }
+        };
+        for (int l = 0; l < 8; ++l) if (base + l < local) mask |= uint8_t(1 << l);
+        set3(lid, [&](uint32_t li, uint32_t* o) { o[0] = li % lx; o[1] = (li / lx) % ly; o[2] = li / (lx * ly); });
+        set3(gid, [&](uint32_t li, uint32_t* o) {
+          o[0] = wx * lx + li % lx; o[1] = wy * ly + (li / lx) % ly; o[2] = wz * lz + li / (lx * ly);
+        });
+        set3(wid, [&](uint32_t, uint32_t* o) { o[0] = wx; o[1] = wy; o[2] = wz; });
+        set3(nwg, [&](uint32_t, uint32_t* o) { o[0] = gx; o[1] = gy; o[2] = gz; });
+        if (lix >= 0) {
+          uint32_t* v = reinterpret_cast<uint32_t*>(inv.input(uint32_t(lix)));
+          for (int l = 0; l < 8; ++l) v[l] = std::min(base + l, local - 1);
+        }
+        inv.run(ex, mask);
+        if (!inv.error.empty()) { missing("compute shader: " + inv.error); failed = true; return; }
+      }
+    }
+  });
+  ex.computeMode = false;
 }
 VKAPI void VKAPI_CALL jsnow_DestroyPipeline(VkDevice, VkPipeline p, const VkAllocationCallbacks*) { delete to<Pipeline>(p); }
 
@@ -1252,7 +1385,7 @@ VKAPI void VKAPI_CALL jsnow_CmdBeginRenderPass(VkCommandBuffer c, const VkRender
   VkRect2D area = bi->renderArea;
   std::vector<VkClearValue> clears(bi->pClearValues, bi->pClearValues + bi->clearValueCount);
   REC(c)([=](Exec& ex) {
-    ex.rp = rp; ex.fb = fb; ex.area = area;
+    ex.rp = rp; ex.fb = fb; ex.area = area; ex.subpass = 0;
     for (size_t i = 0; i < rp->att.size() && i < fb->views.size(); ++i) {
       const bool depth = isDepth(rp->att[i].format);
       if (rp->att[i].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR && i < clears.size()) clearAttachment(fb->views[i], clears[i], area);
@@ -1261,24 +1394,28 @@ VKAPI void VKAPI_CALL jsnow_CmdBeginRenderPass(VkCommandBuffer c, const VkRender
   });
 }
 VKAPI void VKAPI_CALL jsnow_CmdEndRenderPass(VkCommandBuffer c) { REC(c)([](Exec& ex) { ex.rp = nullptr; ex.fb = nullptr; }); }
-VKAPI void VKAPI_CALL jsnow_CmdNextSubpass(VkCommandBuffer, VkSubpassContents) { missing("vkCmdNextSubpass"); }
+VKAPI void VKAPI_CALL jsnow_CmdNextSubpass(VkCommandBuffer c, VkSubpassContents) { REC(c)([](Exec& ex) { ++ex.subpass; }); }
 VKAPI void VKAPI_CALL jsnow_CmdBindPipeline(VkCommandBuffer c, VkPipelineBindPoint bp, VkPipeline p) {
   Pipeline* pp = to<Pipeline>(p);
-  if (bp != VK_PIPELINE_BIND_POINT_GRAPHICS) { missing("compute bind point"); return; }
-  REC(c)([=](Exec& ex) { ex.pipe = pp; });
+  if (bp == VK_PIPELINE_BIND_POINT_COMPUTE) REC(c)([=](Exec& ex) { ex.cpipe = pp; });
+  else REC(c)([=](Exec& ex) { ex.pipe = pp; });
 }
-VKAPI void VKAPI_CALL jsnow_CmdBindDescriptorSets(VkCommandBuffer c, VkPipelineBindPoint, VkPipelineLayout, uint32_t first, uint32_t n, const VkDescriptorSet* s, uint32_t nd, const uint32_t* d) {
+VKAPI void VKAPI_CALL jsnow_CmdBindDescriptorSets(VkCommandBuffer c, VkPipelineBindPoint bp, VkPipelineLayout, uint32_t first, uint32_t n, const VkDescriptorSet* s, uint32_t nd, const uint32_t* d) {
   std::vector<DescriptorSet*> sets;
   for (uint32_t i = 0; i < n; ++i) sets.push_back(to<DescriptorSet>(s[i]));
   std::vector<uint32_t> dyn(d, d + nd);
+  const bool compute = bp == VK_PIPELINE_BIND_POINT_COMPUTE;
   REC(c)([=](Exec& ex) {
+    DescriptorSet** dst = compute ? ex.csets : ex.sets;
+    std::vector<uint32_t>* dofs = compute ? ex.cdynOffsets : ex.dynOffsets;
     size_t k = 0;
     for (uint32_t i = 0; i < n; ++i) {
-      ex.sets[first + i] = sets[i];
-      ex.dynOffsets[first + i].clear();
+      dst[first + i] = sets[i];
+      dofs[first + i].clear();
+      if (!sets[i]) continue;
       for (auto& b : sets[i]->b)
         if ((b.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC || b.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC) && k < dyn.size())
-          ex.dynOffsets[first + i].push_back(dyn[k++]);
+          dofs[first + i].push_back(dyn[k++]);
     }
   });
 }
@@ -1399,8 +1536,9 @@ VKAPI void VKAPI_CALL jsnow_CmdClearAttachments(VkCommandBuffer c, uint32_t na, 
     if (!ex.rp || !ex.fb) return;
     for (auto& at : as) {
       ImageView* v = nullptr;
-      if (at.aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) v = ex.fb->views[ex.rp->color[at.colorAttachment]];
-      else if (ex.rp->depth >= 0) v = ex.fb->views[ex.rp->depth];
+      const Subpass& sp = ex.rp->sub[std::min<size_t>(ex.subpass, ex.rp->sub.size() - 1)];
+      if (at.aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) v = ex.fb->views[sp.color[at.colorAttachment]];
+      else if (sp.depth >= 0) v = ex.fb->views[sp.depth];
       if (v) for (auto& rr : rs) clearAttachment(v, at.clearValue, rr.rect);
     }
   });
@@ -1425,7 +1563,9 @@ VKAPI void VKAPI_CALL jsnow_CmdExecuteCommands(VkCommandBuffer c, uint32_t n, co
 VKAPI void VKAPI_CALL jsnow_CmdSetLineWidth(VkCommandBuffer, float) {}
 VKAPI void VKAPI_CALL jsnow_CmdSetDepthBias(VkCommandBuffer, float, float, float) { missing("vkCmdSetDepthBias"); }
 VKAPI void VKAPI_CALL jsnow_CmdSetBlendConstants(VkCommandBuffer, const float[4]) { missing("blend constants"); }
-VKAPI void VKAPI_CALL jsnow_CmdDispatch(VkCommandBuffer, uint32_t, uint32_t, uint32_t) { missing("vkCmdDispatch (compute)"); }
+VKAPI void VKAPI_CALL jsnow_CmdDispatch(VkCommandBuffer c, uint32_t x, uint32_t y, uint32_t z) {
+  REC(c)([=](Exec& ex) { cmdDispatch(ex, x, y, z, 0, 0, 0); });
+}
 
 VKAPI VkResult VKAPI_CALL jsnow_QueueSubmit(VkQueue q, uint32_t n, const VkSubmitInfo* s, VkFence f) {
   static double totalMs = 0;
@@ -1583,8 +1723,17 @@ VKAPI void VKAPI_CALL jsnow_CmdDrawIndexedIndirect(VkCommandBuffer c, VkBuffer b
     }
   });
 }
-VKAPI void VKAPI_CALL jsnow_CmdDispatchIndirect(VkCommandBuffer, VkBuffer, VkDeviceSize) { missing("vkCmdDispatchIndirect (compute)"); }
-VKAPI void VKAPI_CALL jsnow_CmdDispatchBase(VkCommandBuffer, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) { missing("vkCmdDispatchBase (compute)"); }
+VKAPI void VKAPI_CALL jsnow_CmdDispatchIndirect(VkCommandBuffer c, VkBuffer b, VkDeviceSize off) {
+  Buffer* bb = to<Buffer>(b);
+  REC(c)([=](Exec& ex) {
+    VkDispatchIndirectCommand d;
+    std::memcpy(&d, bb->ptr() + off, sizeof d);
+    cmdDispatch(ex, d.x, d.y, d.z, 0, 0, 0);
+  });
+}
+VKAPI void VKAPI_CALL jsnow_CmdDispatchBase(VkCommandBuffer c, uint32_t bx, uint32_t by, uint32_t bz, uint32_t x, uint32_t y, uint32_t z) {
+  REC(c)([=](Exec& ex) { cmdDispatch(ex, x, y, z, bx, by, bz); });
+}
 struct Event { std::atomic<bool> set{false}; };
 VKAPI VkResult VKAPI_CALL jsnow_CreateEvent(VkDevice, const VkEventCreateInfo*, const VkAllocationCallbacks*, VkEvent* out) { *out = from<VkEvent>(new Event()); return VK_SUCCESS; }
 VKAPI void VKAPI_CALL jsnow_DestroyEvent(VkDevice, VkEvent e, const VkAllocationCallbacks*) { delete to<Event>(e); }
@@ -1594,10 +1743,10 @@ VKAPI VkResult VKAPI_CALL jsnow_ResetEvent(VkDevice, VkEvent e) { to<Event>(e)->
 VKAPI void VKAPI_CALL jsnow_CmdSetEvent(VkCommandBuffer c, VkEvent e, VkPipelineStageFlags) { Event* ev = to<Event>(e); REC(c)([=](Exec&) { ev->set = true; }); }
 VKAPI void VKAPI_CALL jsnow_CmdResetEvent(VkCommandBuffer c, VkEvent e, VkPipelineStageFlags) { Event* ev = to<Event>(e); REC(c)([=](Exec&) { ev->set = false; }); }
 VKAPI void VKAPI_CALL jsnow_CmdWaitEvents(VkCommandBuffer, uint32_t, const VkEvent*, VkPipelineStageFlags, VkPipelineStageFlags, uint32_t, const VkMemoryBarrier*, uint32_t, const VkBufferMemoryBarrier*, uint32_t, const VkImageMemoryBarrier*) {}
-struct BufferView { Buffer* b; VkFormat f; };
 VKAPI VkResult VKAPI_CALL jsnow_CreateBufferView(VkDevice, const VkBufferViewCreateInfo* ci, const VkAllocationCallbacks*, VkBufferView* out) {
-  missing("texel buffers (views created, not readable from shaders)");
-  *out = from<VkBufferView>(new BufferView{to<Buffer>(ci->buffer), ci->format});
+  Buffer* b = to<Buffer>(ci->buffer);
+  const VkDeviceSize range = ci->range == VK_WHOLE_SIZE ? b->size - ci->offset : ci->range;
+  *out = from<VkBufferView>(new BufferView{b, ci->format, ci->offset, range});
   return VK_SUCCESS;
 }
 VKAPI void VKAPI_CALL jsnow_DestroyBufferView(VkDevice, VkBufferView v, const VkAllocationCallbacks*) { delete to<BufferView>(v); }
