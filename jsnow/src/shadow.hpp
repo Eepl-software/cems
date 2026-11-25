@@ -15,6 +15,8 @@ class ShadowMaps final : public ShadowLookup {
  public:
   static constexpr int kCascades = 3;
   ShadowMaps(ThreadPool& pool, const Scene& scene, int size = 1024);
+  // Cascade c is re-rendered every kPeriod[c] calls (staggered), or earlier if
+  // its cached map no longer covers the current frustum slice.
   void update(const Camera& cam, Vec3 sunDir, StageTimes& st);
   simd::vf sample(simd::vf wx, simd::vf wy, simd::vf wz, simd::vf viewW, simd::vf ndl) const override;
   const float* map(int c) const { return maps_.data() + size_t(c) * S_ * S_; }
@@ -30,6 +32,12 @@ class ShadowMaps final : public ShadowLookup {
   float splits_[kCascades] = {22.0f, 65.0f, 230.0f};
   float rows_[kCascades][12];  // light clip x, y, z rows (affine) per cascade
   float biasScale_[kCascades];  // depth units per shadow texel
+  Vec3 cachedCenter_[kCascades];
+  float cachedRadius_[kCascades] = {0, 0, 0};
+  bool valid_[kCascades] = {false, false, false};
+  int calls_ = 0;
+ public:
+  int rendersLastUpdate = 0;
 };
 
 }  // namespace jsnow

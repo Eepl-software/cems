@@ -31,6 +31,8 @@ Tools installed in the session (needed again in a fresh container):
 | A5 NEON (x86 numbers; shadow 5.2) | fast | 74.7 | 13.38 | 33.9 | 0.31 | 1.22 | 5.85 | 0.44 | – | 0.37 | raster ≈ shadow |
 | B1 visibility buffer (shadow 11.2) | baseline | 34.4 | 29.09 | ref | 0.67 | 2.91 | 14.34 | – | – | – | raster 14.3, shadow 11.2 |
 | B1 visibility buffer (shadow 5.4) | fast | 92.4 | 10.82 | 33.9 | 0.33 | 1.36 | 2.90 | 0.47 | – | 0.40 | shadow passes 5.4 (half the frame) |
+| B2 staggered cascades (shadow 7.4) | baseline | 41.0 | 24.36 | ref | 0.68 | 2.76 | 13.56 | – | – | – | raster 13.6 (shading) |
+| B2 staggered cascades (shadow 3.5) | fast | 120 | 8.35 | 33.9 | 0.30 | 1.23 | 2.56 | 0.44 | – | 0.37 | shadow 3.5, raster 2.6 |
 
 ## Decisions log
 - A1: `--fast` = half resolution + reuse (best trade-off found in session 1).
@@ -65,9 +67,13 @@ Tools installed in the session (needed again in a fresh container):
 ## Phase B optimisation rounds
 | round | change | baseline ms before → after | gain | fast ms before → after | gain |
 |---|---|---|---:|---|---:|
+| B2 | staggered shadow cascades (c0 every frame, c1 every 2nd, c2 every 4th, kept only while they still cover the slice; 15% radius margin) | 29.09 → 24.36 | 16% | 10.82 → 8.35 | 23% |
 | B1 | per-tile visibility buffer: raster writes depth + triangle id only; each tile shaded once per pixel, attributes resolved per distinct triangle per 8-px group, per-lane materials (texture array) | 44.57 → 29.09 | 35% | 13.38 → 10.82 | 19% |
 
 B1 output is bit-identical to the forward renderer (same per-pixel math).
+B2 quality cost: frame 150 / 297 vs always-updated cascades = 99.0 / 98.2 dB
+(`JSNOW_SHADOW_NOCACHE=1` disables caching; `JSNOW_SHADOW_DEBUG=1` prints shadow sub-stages).
+Quality pass now renders the reference every frame so its caches stay in step.
 
 ## Done
 - Session 1: tiled AVX2 rasterizer, half/checker/reuse tricks, benchmark harness.
@@ -78,4 +84,4 @@ B1 output is bit-identical to the forward renderer (same per-pixel math).
 - A5: NEON path (cross-compiled, functionally verified under qemu).
 
 ## Next
-- Phase B round 2: shadow passes (11 ms baseline, 5.4 ms fast).
+- Phase B round 3: baseline raster/shading 13.6 ms.

@@ -2,6 +2,8 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 
 namespace jsnow {
 
@@ -14,6 +16,7 @@ void ShadowMaps::update(const Camera& cam, Vec3 L, StageTimes& st) {
   using clk = std::chrono::steady_clock;
   auto t0 = clk::now();
   StageTimes inner;
+  rendersLastUpdate = 0;
   const float th = std::tan(cam.fovy * 0.5f);
   // Light basis.
   const Vec3 fwd = L * -1.0f;
@@ -39,10 +42,30 @@ void ShadowMaps::update(const Camera& cam, Vec3 L, StageTimes& st) {
     float r = 0;
     for (const Vec3& p : corners) r = std::max(r, std::sqrt(dot(p - center, p - center)));
     r = std::ceil(r);  // stable size -> stable texel footprint
+    static constexpr int kPeriod[kCascades] = {1, 2, 4};
+    static constexpr int kPhase[kCascades] = {0, 1, 2};
+    static constexpr float kMargin[kCascades] = {1.0f, 1.15f, 1.15f};
+    static const bool noCache = std::getenv("JSNOW_SHADOW_NOCACHE") != nullptr;
+    if (!noCache && valid_[c] && (calls_ % kPeriod[c]) != kPhase[c] % kPeriod[c]) {
+      // Keep the cached map if it still contains this slice's bounding sphere
+      // (measured in the light's image plane).
+      const Vec3 d = center - cachedCenter_[c];
+      const float dr = dot(d, right), du = dot(d, up);
+      if (std::sqrt(dr * dr + du * du) + r <= cachedRadius_[c]) {
+        nearD = farD * 0.9f;
+        continue;
+      }
+    }
+    r *= kMargin[c];
+    r = std::ceil(r);
+    ++rendersLastUpdate;
     const float texel = 2 * r / S_;
     // Snap the centre to the texel grid in light space.
     const float cr = dot(center, right), cu = dot(center, up);
     center = center + right * (std::floor(cr / texel) * texel - cr) + up * (std::floor(cu / texel) * texel - cu);
+    cachedCenter_[c] = center;
+    cachedRadius_[c] = r;
+    valid_[c] = true;
     const float D = r + 150.0f, farZ = D + r + 60.0f;
     const Vec3 eye = center + L * D;
     const Mat4 view = lookAt(eye, center, right);  // any up not parallel to L
@@ -69,7 +92,16 @@ void ShadowMaps::update(const Camera& cam, Vec3 L, StageTimes& st) {
     rast_.render(pp, draws_, t, inner);
     nearD = farD * 0.9f;  // overlap a little
   }
+  ++calls_;
   st.shadow += std::chrono::duration<double, std::milli>(clk::now() - t0).count();
+  if (std::getenv("JSNOW_SHADOW_DEBUG")) {
+    static StageTimes acc;
+    static int n = 0;
+    acc += inner;
+    if (++n % 100 == 0)
+      std::fprintf(stderr, "shadow inner ms/frame: cull %.2f vertex %.2f setup %.2f raster %.2f (binned last %zu)\n",
+                   acc.cull / n, acc.vertex / n, acc.setup / n, acc.raster / n, rast_.lastBinnedTriangles());
+  }
 }
 
 vf ShadowMaps::sample(vf wx, vf wy, vf wz, vf viewW, vf ndl) const {

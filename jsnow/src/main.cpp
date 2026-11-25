@@ -76,8 +76,8 @@ Result runConfig(ThreadPool& pool, const Scene& scene, const Options& o, int fra
     int count = 0;
     for (int f = 0; f < frames; ++f) {
       const uint32_t* img = test.renderFrame(f, dummy);
+      const uint32_t* refImg = reference.renderFrame(f, dummy);  // every frame: keeps its caches in step
       if (f % 5 == 4) {
-        const uint32_t* refImg = reference.renderFrame(f, dummy);
         sum += mse(img, refImg, size_t(o.outW) * o.outH);
         ++count;
       }
