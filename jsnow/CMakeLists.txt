@@ -53,9 +53,10 @@ option(JSNOW_BUILD_ICD "Build the JSNOW Vulkan ICD (needs Vulkan headers + xcb)"
 find_path(VULKAN_ICD_HEADER vulkan/vk_icd.h)
 find_library(XCB_LIB xcb)
 if(JSNOW_BUILD_ICD AND VULKAN_ICD_HEADER AND XCB_LIB)
-  add_library(jsnow_icd SHARED icd/icd.cpp icd/spirv.cpp)
+  add_library(jsnow_icd SHARED icd/icd.cpp icd/spirv.cpp icd/jit.cpp)
+  target_compile_definitions(jsnow_icd PRIVATE JSNOW_SRC_DIR="${CMAKE_SOURCE_DIR}/src" JSNOW_ICD_DIR="${CMAKE_SOURCE_DIR}/icd")
   target_compile_options(jsnow_icd PRIVATE -O2 -fvisibility=hidden -Wall)
-  target_link_libraries(jsnow_icd PRIVATE ${XCB_LIB} Threads::Threads)
+  target_link_libraries(jsnow_icd PRIVATE ${XCB_LIB} Threads::Threads ${CMAKE_DL_LIBS})
   set_target_properties(jsnow_icd PROPERTIES PREFIX "lib")
   file(GENERATE OUTPUT ${CMAKE_BINARY_DIR}/jsnow_icd.json CONTENT
 "{\n  \"file_format_version\": \"1.0.0\",\n  \"ICD\": {\n    \"library_path\": \"$<TARGET_FILE:jsnow_icd>\",\n    \"api_version\": \"1.1.0\"\n  }\n}\n")

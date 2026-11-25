@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <memory>
 #include <array>
+#include <atomic>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -96,6 +98,7 @@ class Invocation {
   std::unordered_map<uint64_t, std::vector<uint32_t>> layoutCache_;
   std::vector<uint32_t> resettable_;  // variables whose storage is reset per run  // buffer component offsets per type
   std::vector<int> isPtr_;
+  std::vector<uint32_t*> storagePtr_;  // per id, for JIT-compiled code
   uint8_t killed_ = 0;
 };
 
@@ -133,9 +136,26 @@ class Module {
   // Applies VkSpecializationInfo-style entries (specId, byte offset, size) over `data`.
   void foldSpecOps();
   void specialize(const std::vector<std::array<uint32_t, 3>>& entries, const uint8_t* data);
+  // JIT state (not copied with the module: a specialized copy gets its own code).
+  struct JitSlot {
+    std::atomic<int> state{0};  // 0 not tried, 1 ready, 2 failed
+    void* fn = nullptr;
+    std::mutex mu;
+    JitSlot() = default;
+    JitSlot(const JitSlot&) {}
+    JitSlot& operator=(const JitSlot&) { return *this; }
+  };
+  mutable JitSlot jit;
 
  private:
   void computeComps(uint32_t id);
 };
+
+// Byte offsets of every flattened component of `type` inside a buffer.
+void bufferLayout(const Module& m, uint32_t type, uint32_t base, uint32_t matrixStride, bool rowMajor,
+                  std::vector<uint32_t>& out);
+// Shared 8-lane texture helpers (interpreter and JIT runtime). Arrays are [comp][8].
+void sample8(const Texture* tx, const uint32_t* coord, const float* lod, uint32_t* out);
+void sampleDref8(const Texture* tx, const uint32_t* coord, const uint32_t* ref, uint32_t* out);
 
 }  // namespace spv

@@ -1,7 +1,10 @@
 #include "spirv.hpp"
+#include "jit.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 
@@ -362,6 +365,17 @@ std::vector<std::pair<int, uint32_t>> Module::locationVars(uint32_t storage) con
 }
 
 // ----------------------------------------------------------------- execute
+namespace {
+bool jitEnabled() {
+  static const bool on = [] { const char* e = std::getenv("JSNOW_JIT"); return !e || std::atoi(e) != 0; }();
+  return on;
+}
+bool jitVerbose() {
+  static const bool on = std::getenv("JSNOW_JIT_VERBOSE") != nullptr;
+  return on;
+}
+}  // namespace
+
 Invocation::Invocation(const Module& m) : m_(m) {
   val_.resize(m.bound);
   storage_.resize(m.bound);
@@ -384,6 +398,8 @@ Invocation::Invocation(const Module& m) : m_(m) {
       if (v.storage != Input && !storage_[id].empty()) resettable_.push_back(id);
     }
   }
+  storagePtr_.resize(m.bound);
+  for (uint32_t id = 0; id < m.bound; ++id) storagePtr_[id] = storage_[id].empty() ? nullptr : storage_[id].data();
 }
 
 void Invocation::resetStorage() {
@@ -400,6 +416,37 @@ void Invocation::resetStorage() {
 void Invocation::run(const Resources& res, uint8_t activeMask) {
   killed_ = 0;
   resetStorage();
+  if (jitEnabled()) {
+    Module::JitSlot& js = m_.jit;
+    int st = js.state.load(std::memory_order_acquire);
+    if (st == 0) {
+      // First thread compiles; the others keep interpreting meanwhile.
+      std::unique_lock<std::mutex> lk(js.mu, std::try_to_lock);
+      if (lk.owns_lock() && js.state.load() == 0) {
+        std::string err;
+        js.fn = reinterpret_cast<void*>(jit::compile(m_, err));
+        if (jitVerbose() || !js.fn)
+          std::fprintf(stderr, "[jsnow-jit] %s shader (model %d): %s\n", js.fn ? "compiled" : "interpreting",
+                       m_.executionModel, js.fn ? "ok" : err.c_str());
+        js.state.store(js.fn ? 1 : 2, std::memory_order_release);
+        st = js.state.load();
+      }
+    }
+    if (st == 1) {
+      jsnow_jit::Ctx ctx;
+      ctx.storage = storagePtr_.data();
+      ctx.res = &res;
+      ctx.rt = jit::runtime();
+      ctx.push = res.pushConstants;
+      ctx.fragX = fragX;
+      ctx.fragY = fragY;
+      ctx.active = activeMask;
+      ctx.killed = 0;
+      reinterpret_cast<jsnow_jit::ShaderFn>(js.fn)(&ctx);
+      killed_ = uint8_t(ctx.killed & activeMask);
+      return;
+    }
+  }
   if (exec(res, activeMask, false, 0)) return;
   if (!error.empty()) return;
   // Divergent control flow: re-run one lane at a time.
@@ -559,6 +606,164 @@ void writeTexel(const Texture& tx, int x, int y, const uint32_t in[4]) {
     default: for (int c = 0; c < 4; ++c) p[c] = q(fv[c]); break;
   }
 }
+}  // namespace
+
+void bufferLayout(const Module& m, uint32_t type, uint32_t base, uint32_t matrixStride, bool rowMajor,
+                  std::vector<uint32_t>& out) {
+  layout(m, type, base, matrixStride, rowMajor, out);
+}
+
+void sample8(const Texture* tx, const uint32_t* c, const float* lod, uint32_t* out) {
+  float lodv[L] = {};
+  if (lod) {
+    for (int l = 0; l < L; ++l) lodv[l] = lod[l];
+  } else if (tx) {
+    // Derivatives from the 4x2 lane block.
+    for (int l = 0; l < L; ++l) {
+      const int x0 = l & ~1, y0 = l & ~4;
+      const float dsx = (f(c[x0 | 1]) - f(c[x0])) * tx->width, dtx = (f(c[L + (x0 | 1)]) - f(c[L + x0])) * tx->height;
+      const float dsy = (f(c[y0 | 4]) - f(c[y0])) * tx->width, dty = (f(c[L + (y0 | 4)]) - f(c[L + y0])) * tx->height;
+      const float rho = std::max(dsx * dsx + dtx * dtx, dsy * dsy + dty * dty);
+      lodv[l] = 0.5f * std::log2(std::max(rho, 1e-12f));
+    }
+  }
+  for (int l = 0; l < L; ++l)
+    for (int ch = 0; ch < 4; ++ch)
+      out[size_t(ch) * L + l] = u(tx ? sampleTexture(*tx, f(c[l]), f(c[L + l]), lodv[l], ch) : (ch == 3 ? 1.0f : 0.0f));
+}
+
+void sampleDref8(const Texture* tx, const uint32_t* c, const uint32_t* dref, uint32_t* out) {
+  // Depth comparison with 2x2 bilinear PCF.
+  for (int l = 0; l < L; ++l) {
+    float r = 1.0f;
+    if (tx) {
+      const float s0 = f(c[l]), t0 = f(c[L + l]), ref = f(dref[l]);
+      const float x = s0 * tx->width - 0.5f, y = t0 * tx->height - 0.5f;
+      const int x0 = int(std::floor(x)), y0 = int(std::floor(y));
+      const float ax = x - x0, ay = y - y0;
+      auto cmp = [&](int xx, int yy) {
+        if (xx < 0 || yy < 0 || xx >= tx->width || yy >= tx->height) return tx->borderOne;
+        const float d = sampleTexture(*tx, (xx + 0.5f) / tx->width, (yy + 0.5f) / tx->height, 0.0f, 0);
+        switch (tx->compareOp) {
+          case 1: return ref < d ? 1.0f : 0.0f;
+          case 2: return ref == d ? 1.0f : 0.0f;
+          case 3: return ref <= d ? 1.0f : 0.0f;
+          case 4: return ref > d ? 1.0f : 0.0f;
+          case 6: return ref >= d ? 1.0f : 0.0f;
+          case 7: return 1.0f;
+          default: return 0.0f;
+        }
+      };
+      const float t1 = cmp(x0, y0) + (cmp(x0 + 1, y0) - cmp(x0, y0)) * ax;
+      const float b1 = cmp(x0, y0 + 1) + (cmp(x0 + 1, y0 + 1) - cmp(x0, y0 + 1)) * ax;
+      r = t1 + (b1 - t1) * ay;
+    }
+    out[l] = u(r);
+  }
+}
+
+// ----------------------------------------------------------------- JIT runtime
+namespace {
+using jsnow_jit::Ctx;
+const Resources& R(const Ctx* c) { return *static_cast<const Resources*>(c->res); }
+const uint8_t* rtBuffer(const Ctx* c, int set, int binding) { return R(c).buffer(set, binding); }
+void rtSample(const Ctx* c, int set, int binding, const uint32_t* coord, int, const uint32_t* lod, const uint32_t* ref,
+              uint32_t* out) {
+  const Texture* tx = R(c).texture(set, binding);
+  if (ref) { sampleDref8(tx, coord, ref, out); return; }
+  float lodv[L];
+  if (lod) for (int l = 0; l < L; ++l) lodv[l] = f(lod[l]);
+  sample8(tx, coord, lod ? lodv : nullptr, out);
+}
+void rtImageRead(const Ctx* c, int set, int binding, const uint32_t* co, int nc, uint32_t* out) {
+  const Texture* tx = R(c).texture(set, binding);
+  for (int l = 0; l < L; ++l) {
+    uint32_t t4[4] = {0, 0, 0, 0};
+    if (tx) {
+      int x = int32_t(co[l]), y = nc > 1 ? int32_t(co[L + l]) : 0;
+      if (tx->isSubpass) { x += c->fragX[l]; y += c->fragY[l]; }
+      readTexel(*tx, x, y, t4);
+    }
+    for (int k = 0; k < 4; ++k) out[k * L + l] = t4[k];
+  }
+}
+void rtImageWrite(const Ctx* c, int set, int binding, const uint32_t* co, int nc, const uint32_t* t, int nt,
+                  uint32_t mask) {
+  const Texture* tx = R(c).texture(set, binding);
+  if (!tx) return;
+  for (int l = 0; l < L; ++l)
+    if (mask & (1u << l)) {
+      uint32_t t4[4] = {0, 0, 0, u(1.0f)};
+      for (int k = 0; k < nt && k < 4; ++k) t4[k] = t[k * L + l];
+      writeTexel(*tx, int32_t(co[l]), nc > 1 ? int32_t(co[L + l]) : 0, t4);
+    }
+}
+void rtQuerySize(const Ctx* c, int set, int binding, int lod, uint32_t* out, int* levels) {
+  const Texture* tx = R(c).texture(set, binding);
+  *levels = tx ? tx->levels : 1;
+  out[0] = tx ? uint32_t(std::max(1, tx->width >> lod)) : 1;
+  out[1] = tx ? uint32_t(std::max(1, tx->height >> lod)) : 1;
+  out[2] = 1;
+  if (tx && tx->isBuffer) out[0] = uint32_t(tx->width);
+}
+uint32_t rtAtomic(int op, uint32_t* addr, uint32_t x, uint32_t y) {
+  switch (op) {
+    case OpAtomicLoad: return __atomic_load_n(addr, __ATOMIC_SEQ_CST);
+    case OpAtomicStore: __atomic_store_n(addr, x, __ATOMIC_SEQ_CST); return 0;
+    case OpAtomicExchange: return __atomic_exchange_n(addr, x, __ATOMIC_SEQ_CST);
+    case OpAtomicCompareExchange: {
+      uint32_t expected = y;
+      __atomic_compare_exchange_n(addr, &expected, x, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+      return expected;
+    }
+    case OpAtomicIIncrement: return __atomic_fetch_add(addr, 1u, __ATOMIC_SEQ_CST);
+    case OpAtomicIDecrement: return __atomic_fetch_sub(addr, 1u, __ATOMIC_SEQ_CST);
+    case OpAtomicIAdd: return __atomic_fetch_add(addr, x, __ATOMIC_SEQ_CST);
+    case OpAtomicISub: return __atomic_fetch_sub(addr, x, __ATOMIC_SEQ_CST);
+    case OpAtomicAnd: return __atomic_fetch_and(addr, x, __ATOMIC_SEQ_CST);
+    case OpAtomicOr: return __atomic_fetch_or(addr, x, __ATOMIC_SEQ_CST);
+    case OpAtomicXor: return __atomic_fetch_xor(addr, x, __ATOMIC_SEQ_CST);
+    default: {
+      uint32_t cur = __atomic_load_n(addr, __ATOMIC_SEQ_CST), nv;
+      do {
+        switch (op) {
+          case OpAtomicSMin: nv = uint32_t(std::min(int32_t(cur), int32_t(x))); break;
+          case OpAtomicSMax: nv = uint32_t(std::max(int32_t(cur), int32_t(x))); break;
+          case OpAtomicUMin: nv = std::min(cur, x); break;
+          default: nv = std::max(cur, x); break;
+        }
+      } while (!__atomic_compare_exchange_n(addr, &cur, nv, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
+      return cur;
+    }
+  }
+}
+void rtMatrixInverse(const uint32_t* M, uint32_t* out, int n, int lanes) {
+  for (int l = 0; l < lanes; ++l) {
+    double A[4][8] = {};
+    for (int col = 0; col < n; ++col)
+      for (int row = 0; row < n; ++row) { A[row][col] = f(M[(col * n + row) * L + l]); A[row][n + col] = row == col; }
+    double det = 1;
+    for (int i2 = 0; i2 < n; ++i2) {
+      int piv = i2;
+      for (int r2 = i2 + 1; r2 < n; ++r2) if (std::fabs(A[r2][i2]) > std::fabs(A[piv][i2])) piv = r2;
+      if (piv != i2) { for (int k2 = 0; k2 < 2 * n; ++k2) std::swap(A[i2][k2], A[piv][k2]); det = -det; }
+      const double d = A[i2][i2];
+      det *= d;
+      if (d == 0) continue;
+      for (int k2 = 0; k2 < 2 * n; ++k2) A[i2][k2] /= d;
+      for (int r2 = 0; r2 < n; ++r2)
+        if (r2 != i2) {
+          const double fct = A[r2][i2];
+          for (int k2 = 0; k2 < 2 * n; ++k2) A[r2][k2] -= fct * A[i2][k2];
+        }
+    }
+    for (int col = 0; col < n; ++col)
+      for (int row = 0; row < n; ++row) out[(col * n + row) * L + l] = u(float(A[row][n + col]));
+    out[n * n * L + l] = u(float(det));
+  }
+}
+const jsnow_jit::RT kRuntime = {rtBuffer, rtSample, rtImageRead, rtImageWrite, rtQuerySize, rtAtomic, rtMatrixInverse};
+
 }  // namespace
 
 bool Invocation::exec(const Resources& res, uint8_t mask0, bool scalar, int lane) {
@@ -828,27 +1033,15 @@ bool Invocation::exec(const Resources& res, uint8_t mask0, bool scalar, int lane
         break;
       }
       case OpImageSampleImplicitLod: case OpImageSampleExplicitLod: {
-        const uint32_t id = a[1];
-        auto& v = ensure(id);
+        auto& v = ensure(a[1]);
         const Variable& var = m.vars[val_[a[2]][0]];
         const Texture* tx = res.texture(var.set, var.binding);
-        const auto& c = val_[a[3]];
-        float lodv[L] = {};
-        if (in.op == OpImageSampleExplicitLod && wc > 5) {
-          for (int l = 0; l < L; ++l) lodv[l] = f(val_[a[5]][l]);
-        } else if (tx) {
-          // Derivatives from the 4x2 lane block.
-          for (int l = 0; l < L; ++l) {
-            const int x0 = l & ~1, y0 = l & ~4;
-            const float dsx = (f(c[x0 | 1]) - f(c[x0])) * tx->width, dtx = (f(c[L + (x0 | 1)]) - f(c[L + x0])) * tx->height;
-            const float dsy = (f(c[y0 | 4]) - f(c[y0])) * tx->width, dty = (f(c[L + (y0 | 4)]) - f(c[L + y0])) * tx->height;
-            const float rho = std::max(dsx * dsx + dtx * dtx, dsy * dsy + dty * dty);
-            lodv[l] = 0.5f * std::log2(std::max(rho, 1e-12f));
-          }
-        }
-        for (int l = 0; l < L; ++l)
-          for (int ch = 0; ch < 4; ++ch)
-            v[size_t(ch) * L + l] = u(tx ? sampleTexture(*tx, f(c[l]), f(c[L + l]), lodv[l], ch) : (ch == 3 ? 1.0f : 0.0f));
+        float lodv[L];
+        const bool expl = in.op == OpImageSampleExplicitLod && wc > 5;
+        if (expl) for (int l = 0; l < L; ++l) lodv[l] = f(val_[a[5]][l]);
+        uint32_t out[4 * L];
+        sample8(tx, val_[a[3]].data(), expl ? lodv : nullptr, out);
+        std::memcpy(v.data(), out, std::min(v.size(), size_t(4 * L)) * 4);
         break;
       }
       case OpControlBarrier: case OpMemoryBarrier: break;  // invocations run independently (no shared memory)
@@ -961,38 +1154,9 @@ bool Invocation::exec(const Resources& res, uint8_t mask0, bool scalar, int lane
         break;
       }
       case OpImageSampleDrefImplicitLod: case OpImageSampleDrefExplicitLod: {
-        // Depth comparison with 2x2 bilinear PCF.
         auto& v = ensure(a[1]);
         const Variable& var = m.vars[val_[a[2]][0]];
-        const Texture* tx = res.texture(var.set, var.binding);
-        const auto& c = val_[a[3]];
-        const auto& dref = val_[a[4]];
-        for (int l = 0; l < L; ++l) {
-          float r = 1.0f;
-          if (tx) {
-            const float s0 = f(c[l]), t0 = f(c[L + l]), ref = f(dref[l]);
-            const float x = s0 * tx->width - 0.5f, y = t0 * tx->height - 0.5f;
-            const int x0 = int(std::floor(x)), y0 = int(std::floor(y));
-            const float ax = x - x0, ay = y - y0;
-            auto cmp = [&](int xx, int yy) {
-              if (xx < 0 || yy < 0 || xx >= tx->width || yy >= tx->height) return tx->borderOne;
-              const float d = sampleTexture(*tx, (xx + 0.5f) / tx->width, (yy + 0.5f) / tx->height, 0.0f, 0);
-              switch (tx->compareOp) {
-                case 1: return ref < d ? 1.0f : 0.0f;
-                case 2: return ref == d ? 1.0f : 0.0f;
-                case 3: return ref <= d ? 1.0f : 0.0f;
-                case 4: return ref > d ? 1.0f : 0.0f;
-                case 6: return ref >= d ? 1.0f : 0.0f;
-                case 7: return 1.0f;
-                default: return 0.0f;
-              }
-            };
-            const float t1 = cmp(x0, y0) + (cmp(x0 + 1, y0) - cmp(x0, y0)) * ax;
-            const float b1 = cmp(x0, y0 + 1) + (cmp(x0 + 1, y0 + 1) - cmp(x0, y0 + 1)) * ax;
-            r = t1 + (b1 - t1) * ay;
-          }
-          v[l] = u(r);
-        }
+        sampleDref8(res.texture(var.set, var.binding), val_[a[3]].data(), val_[a[4]].data(), v.data());
         break;
       }
       case OpDPdx: case OpDPdxFine: case OpDPdxCoarse: case OpDPdy: case OpDPdyFine: case OpDPdyCoarse:
@@ -1425,3 +1589,7 @@ bool Invocation::exec(const Resources& res, uint8_t mask0, bool scalar, int lane
 }
 
 }  // namespace spv
+
+namespace jit {
+const jsnow_jit::RT* runtime() { return &spv::kRuntime; }
+}  // namespace jit

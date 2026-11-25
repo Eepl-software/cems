@@ -78,6 +78,9 @@ inline vi shlv(vi a, vi n) { return {_mm256_sllv_epi32(a.v, n.v)}; }
 inline vi shrv(vi a, vi n) { return {_mm256_srlv_epi32(a.v, n.v)}; }
 inline vi mini(vi a, vi b) { return {_mm256_min_epi32(a.v, b.v)}; }
 inline vm cmpeq(vi a, vi b) { return {_mm256_castsi256_ps(_mm256_cmpeq_epi32(a.v, b.v))}; }
+inline vm cmpgt(vi a, vi b) { return {_mm256_castsi256_ps(_mm256_cmpgt_epi32(a.v, b.v))}; }
+inline vi operator^(vi a, vi b) { return {_mm256_xor_si256(a.v, b.v)}; }
+inline vm as_m(vi a) { return {_mm256_castsi256_ps(a.v)}; }
 // Per-byte unsigned ops on packed RGBA8.
 inline vi minu8(vi a, vi b) { return {_mm256_min_epu8(a.v, b.v)}; }
 inline vi maxu8(vi a, vi b) { return {_mm256_max_epu8(a.v, b.v)}; }
@@ -191,6 +194,9 @@ inline vi shrv(vi x, vi n) {
 }
 inline vi mini(vi x, vi y) { return JSNOW_F2(vminq_s32); }
 inline vm cmpeq(vi x, vi y) { return JSNOW_F2(vceqq_s32); }
+inline vm cmpgt(vi x, vi y) { return JSNOW_F2(vcgtq_s32); }
+inline vi operator^(vi x, vi y) { return JSNOW_F2(veorq_s32); }
+inline vm as_m(vi x) { return {vreinterpretq_u32_s32(x.a), vreinterpretq_u32_s32(x.b)}; }
 #define JSNOW_U8(op)                                                                      \
   {vreinterpretq_s32_u8(op(vreinterpretq_u8_s32(x.a), vreinterpretq_u8_s32(y.a))),     \
    vreinterpretq_s32_u8(op(vreinterpretq_u8_s32(x.b), vreinterpretq_u8_s32(y.b)))}
@@ -268,6 +274,9 @@ inline vi shlv(vi a, vi n) { JSNOW_MAP(vi, n.l[i] > 31 ? 0 : int32_t(uint32_t(a.
 inline vi shrv(vi a, vi n) { JSNOW_MAP(vi, n.l[i] > 31 ? 0 : int32_t(uint32_t(a.l[i]) >> n.l[i])); }
 inline vi mini(vi a, vi b) { JSNOW_MAP(vi, a.l[i] < b.l[i] ? a.l[i] : b.l[i]); }
 inline vm cmpeq(vi a, vi b) { JSNOW_MAP(vm, a.l[i] == b.l[i] ? ~0u : 0u); }
+inline vm cmpgt(vi a, vi b) { JSNOW_MAP(vm, a.l[i] > b.l[i] ? ~0u : 0u); }
+inline vi operator^(vi a, vi b) { JSNOW_MAP(vi, a.l[i] ^ b.l[i]); }
+inline vm as_m(vi a) { JSNOW_MAP(vm, uint32_t(a.l[i])); }
 template <class F> inline vi bytewise(vi a, vi b, F f) {
   vi r;
   for (int i = 0; i < 8; ++i) {
