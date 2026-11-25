@@ -45,6 +45,8 @@ Tools installed in the session (needed again in a fresh container):
 | C3 transparency (shadow 2.1, post 0.11) | fast | 130 | 7.70 | 32.7 | 0.30 | 0.80 | 3.65 | 0.40 | – | 0.37 | raster+shade 3.7 |
 | C4 bloom (shadow 4.5, post 3.6) | baseline | 31.9 | 31.31 | ref | 0.70 | 1.86 | 20.62 | – | – | – | raster+shade 20.6 (incl. fused bright pass), post 3.6 |
 | C4 bloom (shadow 2.2, post 0.87) | fast | 107 | 9.35 | 32.6 | 0.34 | 0.88 | 4.23 | 0.43 | – | 0.38 | raster+shade 4.2 |
+| C5 TAA (shadow 4.8, post 7.2) | baseline | 26.2 | 38.10 | ref | 0.73 | 2.07 | 23.29 | – | – | – | raster+shade 23.3, post 7.2 (TAA ≈ 3.5) |
+| C5 TAA (shadow 2.3, post 1.3) | fast | 102 | 9.79 | 31.2 | 0.33 | 0.87 | 4.21 | 0.41 | – | 0.37 | raster+shade 4.2 |
 
 ## Decisions log
 - A1: `--fast` = half resolution + reuse (best trade-off found in session 1).
@@ -115,6 +117,17 @@ Tools installed in the session (needed again in a fresh container):
   metal/glass) dominated the bloom differently at each resolution and coarse levels were
   upsampled nearest-neighbour (64-px blocks). Firefly clamp + bilinear upsampling → 32.6 dB.
 - Note: VM timing noise grew during C3/C4 (same binary: 28.3-33.2 ms baseline).
+- C5: TAA. Halton(2,3) sub-pixel jitter (8-frame cycle) applied through the viewport
+  offset; resolve after tone mapping on RGBA8: backward reprojection with the current
+  depth and the previous camera (unjittered sample positions), bilinear history fetch,
+  3x3 neighbourhood min/max clamp on packed bytes (new wrapper ops minu8/maxu8/avgu8),
+  blend 1/8 current + 7/8 history via three rounding byte averages. History = previous
+  *displayed* image (so reprojected `--reuse` frames feed it too). Not combined with
+  `--checker` (sub-images already use fixed sample offsets). `--no-taa`. Costs ≈ 3.5 ms at
+  1080p (post column) — optimisation target.
+- **Phase C complete**: deferred shading (C1), PBR (C1), 128 point lights + tiled culling
+  (C2), transparency (C3), bloom (C4), ACES tone mapping (C1), TAA (C5).
+  Full-quality frame: 38 ms (26 FPS) at 1080p; `--fast`: 9.8 ms (102 FPS) at 31.2 dB.
 
 ## Phase B optimisation rounds
 | round | change | baseline ms before → after | gain | fast ms before → after | gain |
@@ -144,4 +157,6 @@ Quality pass now renders the reference every frame so its caches stay in step.
 - **Phase B stopped after B7**: B5, B6, B7 each gained <10% (stop rule). Phase B total:
   baseline 44.57 → 18.91 ms (2.36x), fast 13.38 → 6.48 ms (2.06x).
   Remaining profile (baseline): tile shading ~8 ms, visibility raster ~4.5 ms, shadow passes 4.4, setup 1.7.
-- Phase C: C5 TAA (tone mapping done in C1).
+- Phase D: D1 5M-triangle scene; D2 meshlets (triangle clusters with bounds + normal cones);
+  D3 hierarchical-Z occlusion culling; D4 LOD streaming (residency budget + background loads);
+  then repeat Phase B (targets: raster+shade, TAA 3.5 ms, bloom 2.5 ms, shadows 4.8 ms).

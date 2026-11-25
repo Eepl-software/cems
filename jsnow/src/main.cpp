@@ -69,7 +69,7 @@ Result runConfig(ThreadPool& pool, const Scene& scene, const Options& o, int fra
   if (quality) {
     // Untimed second pass: compare every 5th frame to the full-quality renderer.
     Options ref;
-    ref.outW = o.outW; ref.outH = o.outH; ref.shadows = o.shadows; ref.pointLights = o.pointLights; ref.transparency = o.transparency; ref.bloom = o.bloom;
+    ref.outW = o.outW; ref.outH = o.outH; ref.shadows = o.shadows; ref.pointLights = o.pointLights; ref.transparency = o.transparency; ref.bloom = o.bloom; ref.taa = o.taa;
     ref.exposure = o.exposure;
     Engine test(pool, scene, o), reference(pool, scene, ref);
     StageTimes dummy;
@@ -113,6 +113,7 @@ void usage() {
       "  --no-lights     disable the point lights\n"
       "  --no-transparency  skip the water and glass (alpha-blended) objects\n"
       "  --no-bloom      disable HDR bloom\n"
+      "  --no-taa        disable temporal anti-aliasing\n"
       "  --lights N      number of point lights (default 128, max 255)\n"
       "  --exposure E    tone-mapping exposure (default 1.6)\n"
       "  --scene S       large (default: 1M tris, 3 LODs) or small (100k, session 1)\n"
@@ -150,6 +151,7 @@ int main(int argc, char** argv) {
     else if (a == "--no-lights") o.pointLights = false;
     else if (a == "--no-transparency") o.transparency = false;
     else if (a == "--no-bloom") o.bloom = false;
+    else if (a == "--no-taa") o.taa = false;
     else if (a == "--exposure") o.exposure = float(std::atof(next().c_str()));
     else if (a == "--bench") bench = true;
     else if (a == "--bench-fast") bench = benchFast = true;

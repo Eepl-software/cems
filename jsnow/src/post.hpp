@@ -69,6 +69,15 @@ class Bloom {
 void tonemap(ThreadPool& pool, int w, int h, const float* const hdr[3], float exposure, uint32_t* out,
              const Bloom* bloom = nullptr, float bloomStrength = 0.0f);
 
+// Temporal anti-aliasing resolve (w x h, RGBA8). Each pixel is unprojected
+// with its depth (stored as depthScale / w) and the current camera, reprojected
+// into the previous frame (history = previous displayed image), sampled
+// bilinearly, clamped to the 3x3 neighbourhood of the current frame and blended
+// 1/8 current + 7/8 history. (jx, jy) is this frame's sub-pixel jitter.
+void taaResolve(ThreadPool& pool, int w, int h, const uint32_t* cur, const uint32_t* hist, const float* depth,
+                const Mat4& curInvView, const Mat4& prevViewProj, float p00, float p11, float depthScale,
+                float jx, float jy, uint32_t* out);
+
 // Trick 1: 2x bilinear upscale, w x h -> 2w x 2h.
 void upscale2x(ThreadPool& pool, int w, int h, const uint32_t* src, uint32_t* dst);
 

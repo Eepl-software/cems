@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <type_traits>
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
 #endif
@@ -400,6 +401,80 @@ void tonemap(ThreadPool& pool, int w, int h, const float* const hdr[3], float ex
         }
         out[i0 + x] = px;
       }
+    }
+  });
+}
+
+void taaResolve(ThreadPool& pool, int w, int h, const uint32_t* cur, const uint32_t* hist, const float* depth,
+                const Mat4& curInvView, const Mat4& prevViewProj, float p00, float p11, float depthScale,
+                float jx, float jy, uint32_t* out) {
+  using namespace simd;
+  const Mat4 M = prevViewProj * curInvView;
+  // Same folding as the reprojector: prev clip = Ax*px + Ay*py + Ad*d + A0,
+  // where (px, py) is the unjittered sample position in pixels.
+  const float kx = 2.0f / (w * p00), bxv = -1.0f / p00;
+  const float ky = -2.0f / (h * p11), byv = 1.0f / p11;
+  float Ax[4], Ay[4], Ad[4], A0[4];
+  for (int r = 0; r < 4; ++r) {
+    const int row = r == 3 ? 12 : r * 4;
+    Ax[r] = M.m[row] * kx;
+    Ay[r] = M.m[row + 1] * ky;
+    Ad[r] = M.m[row + 3] / depthScale;
+    A0[r] = M.m[row] * bxv + M.m[row + 1] * byv - M.m[row + 2];
+  }
+  const float hw = 0.5f * w, hh = 0.5f * h;
+  pool.run((h + 7) / 8, [&](int b, int) {
+    const vf vAx0 = set1(Ax[0]), vAy0 = set1(Ay[0]), vAd0 = set1(Ad[0]), vA00 = set1(A0[0]);
+    const vf vAx1 = set1(Ax[1]), vAy1 = set1(Ay[1]), vAd1 = set1(Ad[1]), vA01 = set1(A0[1]);
+    const vf vAx3 = set1(Ax[3]), vAy3 = set1(Ay[3]), vAd3 = set1(Ad[3]), vA03 = set1(A0[3]);
+    const vi m8 = set1i(255);
+    for (int y = b * 8; y < std::min(h, b * 8 + 8); ++y) {
+      const uint32_t* rm = cur + size_t(std::max(y - 1, 0)) * w;
+      const uint32_t* r0 = cur + size_t(y) * w;
+      const uint32_t* rp = cur + size_t(std::min(y + 1, h - 1)) * w;
+      int x = 0;
+      for (; x + 8 <= w; x += 8) {
+        // 3x3 neighbourhood min/max (packed bytes). Edge columns clamp.
+        const int xl = x == 0 ? 0 : x - 1, xr = std::min(x + 1, w - 8);
+        vi c = loadui(r0 + x);
+        vi lo = c, hi = c;
+        for (const uint32_t* row : {rm, r0, rp})
+          for (int xx : {xl, x, xr}) {
+            const vi v = loadui(row + xx);
+            lo = minu8(lo, v); hi = maxu8(hi, v);
+          }
+        // Reproject.
+        const vf d = max(loadu(depth + size_t(y) * w + x), set1(1e-6f));
+        const vf px = set1(float(x) + 0.5f - jx) + iotaf(), py = set1(float(y) + 0.5f - jy);
+        const vf X = fma(vAx0, px, fma(vAy0, py, fma(vAd0, d, vA00)));
+        const vf Y = fma(vAx1, px, fma(vAy1, py, fma(vAd1, d, vA01)));
+        const vf W = fma(vAx3, px, fma(vAy3, py, fma(vAd3, d, vA03)));
+        const vm ok = W > set1(1e-6f);
+        const vf iw = rcp(select(ok, W, set1(1.0f)));
+        const vf hx = fma(X * iw, set1(hw), set1(hw - 0.5f)), hy = fnma(Y * iw, set1(hh), set1(hh - 0.5f));
+        const vm inside = ok & (hx >= zerof()) & (hy >= zerof()) & (hx <= set1(float(w - 1))) & (hy <= set1(float(h - 1)));
+        const vf fx = floor(clamp(hx, zerof(), set1(float(w - 1)))), fy = floor(clamp(hy, zerof(), set1(float(h - 1))));
+        const vf ax = clamp(hx, zerof(), set1(float(w - 1))) - fx, ay = clamp(hy, zerof(), set1(float(h - 1))) - fy;
+        const vi ix0 = trunc_i(fx), iy0 = trunc_i(fy);
+        const vi ix1 = mini(ix0 + set1i(1), set1i(w - 1)), iy1 = mini(iy0 + set1i(1), set1i(h - 1));
+        const vi row0 = iy0 * set1i(w), row1 = iy1 * set1i(w);
+        const vi t00 = gather(hist, row0 + ix0), t10 = gather(hist, row0 + ix1);
+        const vi t01 = gather(hist, row1 + ix0), t11 = gather(hist, row1 + ix1);
+        auto ch = [&](auto tag) {
+          constexpr int s = decltype(tag)::value;
+          const vf c00 = to_f(shr<s>(t00) & m8), c10 = to_f(shr<s>(t10) & m8);
+          const vf c01 = to_f(shr<s>(t01) & m8), c11 = to_f(shr<s>(t11) & m8);
+          const vf top = fma(ax, c10 - c00, c00), bot = fma(ax, c11 - c01, c01);
+          return trunc_i(fma(ay, bot - top, top) + set1(0.5f));
+        };
+        vi hcol = ch(std::integral_constant<int, 0>{}) | shl<8>(ch(std::integral_constant<int, 8>{})) |
+                  shl<16>(ch(std::integral_constant<int, 16>{})) | set1i(int32_t(0xFF000000u));
+        hcol = minu8(maxu8(hcol, lo), hi);  // neighbourhood clamp
+        // 7/8 history + 1/8 current via three rounding byte averages.
+        const vi blended = avgu8(avgu8(avgu8(c, hcol), hcol), hcol);
+        storeui(out + size_t(y) * w + x, selecti(inside, blended, c));
+      }
+      for (; x < w; ++x) out[size_t(y) * w + x] = r0[x];  // (w is a multiple of 8 in practice)
     }
   });
 }

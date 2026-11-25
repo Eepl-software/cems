@@ -78,6 +78,10 @@ inline vi shlv(vi a, vi n) { return {_mm256_sllv_epi32(a.v, n.v)}; }
 inline vi shrv(vi a, vi n) { return {_mm256_srlv_epi32(a.v, n.v)}; }
 inline vi mini(vi a, vi b) { return {_mm256_min_epi32(a.v, b.v)}; }
 inline vm cmpeq(vi a, vi b) { return {_mm256_castsi256_ps(_mm256_cmpeq_epi32(a.v, b.v))}; }
+// Per-byte unsigned ops on packed RGBA8.
+inline vi minu8(vi a, vi b) { return {_mm256_min_epu8(a.v, b.v)}; }
+inline vi maxu8(vi a, vi b) { return {_mm256_max_epu8(a.v, b.v)}; }
+inline vi avgu8(vi a, vi b) { return {_mm256_avg_epu8(a.v, b.v)}; }  // (a+b+1)>>1
 inline vi maxi(vi a, vi b) { return {_mm256_max_epi32(a.v, b.v)}; }
 inline vi trunc_i(vf a) { return {_mm256_cvttps_epi32(a.v)}; }
 inline vf to_f(vi a) { return {_mm256_cvtepi32_ps(a.v)}; }
@@ -187,6 +191,13 @@ inline vi shrv(vi x, vi n) {
 }
 inline vi mini(vi x, vi y) { return JSNOW_F2(vminq_s32); }
 inline vm cmpeq(vi x, vi y) { return JSNOW_F2(vceqq_s32); }
+#define JSNOW_U8(op)                                                                      \
+  {vreinterpretq_s32_u8(op(vreinterpretq_u8_s32(x.a), vreinterpretq_u8_s32(y.a))),     \
+   vreinterpretq_s32_u8(op(vreinterpretq_u8_s32(x.b), vreinterpretq_u8_s32(y.b)))}
+inline vi minu8(vi x, vi y) { return JSNOW_U8(vminq_u8); }
+inline vi maxu8(vi x, vi y) { return JSNOW_U8(vmaxq_u8); }
+inline vi avgu8(vi x, vi y) { return JSNOW_U8(vrhaddq_u8); }
+#undef JSNOW_U8
 inline vi maxi(vi x, vi y) { return JSNOW_F2(vmaxq_s32); }
 inline vi trunc_i(vf x) { return {vcvtq_s32_f32(x.a), vcvtq_s32_f32(x.b)}; }
 inline vf to_f(vi x) { return {vcvtq_f32_s32(x.a), vcvtq_f32_s32(x.b)}; }
@@ -257,6 +268,18 @@ inline vi shlv(vi a, vi n) { JSNOW_MAP(vi, n.l[i] > 31 ? 0 : int32_t(uint32_t(a.
 inline vi shrv(vi a, vi n) { JSNOW_MAP(vi, n.l[i] > 31 ? 0 : int32_t(uint32_t(a.l[i]) >> n.l[i])); }
 inline vi mini(vi a, vi b) { JSNOW_MAP(vi, a.l[i] < b.l[i] ? a.l[i] : b.l[i]); }
 inline vm cmpeq(vi a, vi b) { JSNOW_MAP(vm, a.l[i] == b.l[i] ? ~0u : 0u); }
+template <class F> inline vi bytewise(vi a, vi b, F f) {
+  vi r;
+  for (int i = 0; i < 8; ++i) {
+    uint32_t o = 0;
+    for (int k = 0; k < 32; k += 8) o |= uint32_t(f((uint32_t(a.l[i]) >> k) & 255u, (uint32_t(b.l[i]) >> k) & 255u)) << k;
+    r.l[i] = int32_t(o);
+  }
+  return r;
+}
+inline vi minu8(vi a, vi b) { return bytewise(a, b, [](uint32_t x, uint32_t y) { return x < y ? x : y; }); }
+inline vi maxu8(vi a, vi b) { return bytewise(a, b, [](uint32_t x, uint32_t y) { return x > y ? x : y; }); }
+inline vi avgu8(vi a, vi b) { return bytewise(a, b, [](uint32_t x, uint32_t y) { return (x + y + 1) >> 1; }); }
 inline vi maxi(vi a, vi b) { JSNOW_MAP(vi, a.l[i] > b.l[i] ? a.l[i] : b.l[i]); }
 inline vi trunc_i(vf a) {
   JSNOW_MAP(vi, (a.l[i] > -2147483648.0f && a.l[i] < 2147483648.0f) ? int32_t(a.l[i]) : INT32_MIN);

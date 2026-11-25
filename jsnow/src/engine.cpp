@@ -3,6 +3,7 @@
 #include "shadow.hpp"
 
 #include <chrono>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -61,6 +62,7 @@ Engine::Engine(ThreadPool& pool, const Scene& scene, Options o)
     for (auto& p : subHdr_) p.resize(n / 4);
   }
   if (o.half) out_.resize(size_t(o.outW) * o.outH);
+  if (o.taa && !o.checker) raw_.resize(n);
   if (o.shadows) shadows_ = std::make_unique<ShadowMaps>(pool, scene);
 }
 
@@ -115,10 +117,26 @@ void Engine::renderScene(const Camera& cam, const Viewport& vp, int w, int h, st
 const uint32_t* Engine::renderFrame(int f, StageTimes& st) {
   const Camera cam = cameraAt(f, float(o_.outW) / float(o_.outH));
   const bool temporal = o_.checker || o_.reuse;
-  const int cur = (o_.reuse && f > 0) ? (hist_ ^ 1) : hist_;
-  const bool needDepth = o_.reuse;
+  const bool taa = o_.taa && !o_.checker;
+  const int cur = ((o_.reuse || taa) && f > 0) ? (hist_ ^ 1) : hist_;
+  const bool needDepth = o_.reuse || taa;
   auto renderFull = [&](int i) {
-    renderScene(cam, Viewport::full(W_, H_), W_, H_, hdr_, needDepth ? depth_[i].data() : nullptr, color_[i].data(), st);
+    if (!taa) {
+      renderScene(cam, Viewport::full(W_, H_), W_, H_, hdr_, needDepth ? depth_[i].data() : nullptr, color_[i].data(), st);
+      return;
+    }
+    // Sub-pixel jitter from the Halton(2,3) sequence, 8-frame cycle.
+    auto halton = [](int i, int b) { float f = 1, r = 0; for (; i > 0; i /= b) { f /= b; r += f * (i % b); } return r; };
+    const float jx = halton((f & 7) + 1, 2) - 0.5f, jy = halton((f & 7) + 1, 3) - 0.5f;
+    Viewport vp = Viewport::full(W_, H_);
+    vp.bx += jx;
+    vp.by += jy;
+    renderScene(cam, vp, W_, H_, hdr_, depth_[i].data(), raw_.data(), st);
+    auto a = clk::now();
+    if (f == 0) std::copy(raw_.begin(), raw_.end(), color_[i].begin());
+    else taaResolve(pool_, W_, H_, raw_.data(), color_[hist_].data(), depth_[i].data(), cam.invView, prevCam_.viewProj,
+                    cam.proj(0, 0), cam.proj(1, 1), kNear, jx, jy, color_[i].data());
+    st.post += ms(a, clk::now());
   };
   auto reproject = [&](int from, int to) {
     auto a = clk::now();

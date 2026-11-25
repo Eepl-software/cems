@@ -18,6 +18,7 @@ struct Options {
   bool pointLights = true;
   bool transparency = true;
   bool bloom = true;
+  bool taa = true;  // temporal anti-aliasing (not combined with --checker)
   float exposure = 1.6f;
   int outW = 1920, outH = 1080;
   std::string name() const;
@@ -60,6 +61,7 @@ class Engine {
   std::vector<float> depth_[2];
   std::vector<float> hdr_[3], subHdr_[3];  // linear HDR of the full / quarter target
   std::vector<uint32_t> subColor_;
+  std::vector<uint32_t> raw_;  // tone-mapped frame before the TAA resolve
   std::vector<float> subDepth_;
   std::vector<uint32_t> out_;
   std::vector<DrawItem> draws_, transparentDraws_;
