@@ -1,3 +1,4 @@
 build/
 build-*/
 *.png
+!docs_*.png
