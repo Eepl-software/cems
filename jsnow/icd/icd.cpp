@@ -360,8 +360,22 @@ void cmdDraw(Exec& ex, uint32_t count, uint32_t instances, uint32_t first, uint3
   for (uint32_t inst = 0; inst < instances; ++inst) drawPrimitives(ex, ids, firstInstance + inst);
 }
 
+struct DrawStats {
+  std::atomic<uint64_t> vsNs{0}, setupNs{0}, fsNs{0}, verts{0}, tris{0}, draws{0}, frags{0};
+  ~DrawStats() {
+    if (std::getenv("JSNOW_ICD_STATS"))
+      std::fprintf(stderr, "[jsnow-icd] %llu draws, %llu vertices, %llu triangles, %llu fragment blocks; time: VS %.0f ms, "
+                   "clip/setup %.0f ms, raster+FS %.0f ms\n", (unsigned long long)draws, (unsigned long long)verts,
+                   (unsigned long long)tris, (unsigned long long)frags, vsNs / 1e6, setupNs / 1e6, fsNs / 1e6);
+  }
+} gStats;
+using sclk = std::chrono::steady_clock;
+inline uint64_t nsSince(sclk::time_point t) { return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(sclk::now() - t).count()); }
+
 void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t instance) {
   Pipeline& P = *ex.pipe;
+  auto tStart = sclk::now();
+  ++gStats.draws;
   if (!P.vs || !P.fs) return;
   const spv::Module& vs = *P.vs;
   const spv::Module& fs = *P.fs;
@@ -383,8 +397,14 @@ void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t instanc
   const uint32_t stride = 4 + K;
   std::vector<float> vout(uniq.size() * stride, 0.0f);
   {
-    spv::Invocation inv(vs);
-    for (size_t b = 0; b < uniq.size(); b += 8) {
+    // Vertex shading in parallel: blocks of 64 vertices, one interpreter per thread.
+    std::vector<std::unique_ptr<spv::Invocation>> invs(ex.dev->pool->size());
+    std::atomic<bool> failed{false};
+    const int vblocks = int((uniq.size() + 63) / 64);
+    ex.dev->pool->run(vblocks, [&](int vb, int tid) {
+    if (!invs[tid]) invs[tid] = std::make_unique<spv::Invocation>(vs);
+    spv::Invocation& inv = *invs[tid];
+    for (size_t b = size_t(vb) * 64; b < std::min(uniq.size(), size_t(vb) * 64 + 64); b += 8) {
       const int n = int(std::min<size_t>(8, uniq.size() - b));
       if (vidVar >= 0) {
         int32_t* v = reinterpret_cast<int32_t*>(inv.input(uint32_t(vidVar)));
@@ -428,7 +448,7 @@ void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t instanc
         }
       }
       inv.run(ex, 0xFF);
-      if (!inv.error.empty()) { missing("vertex shader: " + inv.error); return; }
+      if (!inv.error.empty()) { missing("vertex shader: " + inv.error); failed = true; return; }
       for (int l = 0; l < n; ++l) {
         float* o = vout.data() + (b + l) * stride;
         if (posComp >= 0) for (int c = 0; c < 4; ++c) o[c] = inv.output(posVar)[(posComp + c) * 8 + l];
@@ -437,11 +457,13 @@ void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t instanc
           for (uint32_t c = 0; c < outComps[i]; ++c) o[k++] = inv.output(vsOut[i].second)[c * 8 + l];
       }
     }
+    });
+    if (failed) return;
   }
+  gStats.vsNs += nsSince(tStart);
+  gStats.verts += uniq.size();
+  auto tSetup = sclk::now();
   // ---- primitive assembly + clipping (z >= 0, z <= w, guard band) ----
-  struct Tri { std::vector<float> v[3]; };
-  std::vector<std::array<std::vector<float>, 3>> tris;
-  auto vtx = [&](uint32_t i) { const float* p = vout.data() + size_t(slot[ids[i]]) * stride; return std::vector<float>(p, p + stride); };
   std::vector<std::array<uint32_t, 3>> prims;
   if (P.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) {
     for (size_t i = 0; i + 2 < ids.size(); i += 3) prims.push_back({uint32_t(i), uint32_t(i + 1), uint32_t(i + 2)});
@@ -457,64 +479,85 @@ void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t instanc
   }
   const VkViewport vp = P.dynViewport ? ex.vp : P.viewport;
   const VkRect2D sc = P.dynScissor ? ex.scissor : P.scissor;
-  struct STri { SVert v[3]; std::vector<float> var[3]; bool front; };
+  // Set-up triangles: screen vertices + varyings/w in one flat pool (no per-triangle allocations).
+  struct STri { SVert v[3]; uint32_t var; bool front; };
   std::vector<STri> stris;
+  stris.reserve(prims.size());
+  std::vector<float> varPool;
+  varPool.reserve(prims.size() * 3 * K);
+  const float G = 64.0f;
+  auto dist = [&](const float* v, int plane) {
+    switch (plane) {
+      case 0: return v[2];         // z >= 0
+      case 1: return v[3] - v[2];  // z <= w
+      case 2: return G * v[3] - v[0];
+      case 3: return G * v[3] + v[0];
+      case 4: return G * v[3] - v[1];
+      default: return G * v[3] + v[1];
+    }
+  };
+  auto emit = [&](const float* const* pv) {  // pv: 3 clip-space vertices (stride floats)
+    STri t;
+    for (int j = 0; j < 3; ++j) {
+      const float q = 1.0f / pv[j][3];
+      t.v[j] = {vp.x + (pv[j][0] * q + 1) * vp.width * 0.5f, vp.y + (pv[j][1] * q + 1) * vp.height * 0.5f,
+                vp.minDepth + pv[j][2] * q * (vp.maxDepth - vp.minDepth), q};
+    }
+    // Vulkan area with y down: a = -1/2 sum(x_i y_{i+1} - x_{i+1} y_i); CCW front if a > 0.
+    float a = 0;
+    for (int j = 0; j < 3; ++j) a += t.v[j].x * t.v[(j + 1) % 3].y - t.v[(j + 1) % 3].x * t.v[j].y;
+    a *= -0.5f;
+    if (a == 0 || std::isnan(a)) return;
+    t.front = P.front == VK_FRONT_FACE_COUNTER_CLOCKWISE ? a > 0 : a < 0;
+    if ((P.cull & VK_CULL_MODE_FRONT_BIT) && t.front) return;
+    if ((P.cull & VK_CULL_MODE_BACK_BIT) && !t.front) return;
+    t.var = uint32_t(varPool.size());
+    for (int j = 0; j < 3; ++j)
+      for (uint32_t k = 0; k < K; ++k) varPool.push_back(pv[j][4 + k] * t.v[j].q);  // perspective: var/w
+    stris.push_back(t);
+  };
+  std::vector<float> clipBuf;
   for (auto& pr : prims) {
-    std::vector<std::vector<float>> poly = {vtx(pr[0]), vtx(pr[1]), vtx(pr[2])};
+    const float* pv[3];
+    for (int j = 0; j < 3; ++j) pv[j] = vout.data() + size_t(slot[ids[pr[j]]]) * stride;
+    int outside = 0;
+    for (int plane = 0; plane < 6; ++plane) {
+      int n = 0;
+      for (int j = 0; j < 3; ++j) n += dist(pv[j], plane) < 0;
+      if (n == 3) { outside = -1; break; }
+      if (n) outside = 1;
+    }
+    if (outside < 0) continue;
+    if (outside == 0) { emit(pv); continue; }  // fast path: no clipping
+    // Sutherland-Hodgman against the 6 planes.
+    std::vector<std::vector<float>> poly = {std::vector<float>(pv[0], pv[0] + stride), std::vector<float>(pv[1], pv[1] + stride),
+                                            std::vector<float>(pv[2], pv[2] + stride)};
     for (int plane = 0; plane < 6 && poly.size() >= 3; ++plane) {
-      auto dist = [&](const std::vector<float>& v) {
-        const float G = 64.0f;
-        switch (plane) {
-          case 0: return v[2];             // z >= 0
-          case 1: return v[3] - v[2];      // z <= w
-          case 2: return G * v[3] - v[0];
-          case 3: return G * v[3] + v[0];
-          case 4: return G * v[3] - v[1];
-          default: return G * v[3] + v[1];
-        }
-      };
       std::vector<std::vector<float>> out;
       for (size_t k = 0; k < poly.size(); ++k) {
-        const auto& a = poly[k];
-        const auto& b = poly[(k + 1) % poly.size()];
-        const float da = dist(a), db = dist(b);
-        if (da >= 0) out.push_back(a);
+        const auto& va = poly[k];
+        const auto& vb = poly[(k + 1) % poly.size()];
+        const float da = dist(va.data(), plane), db = dist(vb.data(), plane);
+        if (da >= 0) out.push_back(va);
         if ((da >= 0) != (db >= 0)) {
           const float t = da / (da - db);
           std::vector<float> c(stride);
-          for (uint32_t j = 0; j < stride; ++j) c[j] = a[j] + (b[j] - a[j]) * t;
+          for (uint32_t j = 0; j < stride; ++j) c[j] = va[j] + (vb[j] - va[j]) * t;
           out.push_back(c);
         }
       }
       poly.swap(out);
     }
-    if (poly.size() < 3) continue;
-    std::vector<SVert> sv(poly.size());
-    for (size_t k = 0; k < poly.size(); ++k) {
-      const float q = 1.0f / poly[k][3];
-      sv[k] = {vp.x + (poly[k][0] * q + 1) * vp.width * 0.5f, vp.y + (poly[k][1] * q + 1) * vp.height * 0.5f,
-               vp.minDepth + poly[k][2] * q * (vp.maxDepth - vp.minDepth), q};
-    }
     for (size_t k = 1; k + 1 < poly.size(); ++k) {
-      STri t;
-      const size_t idx[3] = {0, k, k + 1};
-      for (int j = 0; j < 3; ++j) {
-        t.v[j] = sv[idx[j]];
-        t.var[j].assign(poly[idx[j]].begin() + 4, poly[idx[j]].end());
-        for (float& x : t.var[j]) x *= sv[idx[j]].q;  // perspective-correct: interpolate var/w
-      }
-      // Vulkan area with y down: a = -1/2 sum(x_i y_{i+1} - x_{i+1} y_i); CCW front if a > 0.
-      float a = 0;
-      for (int j = 0; j < 3; ++j) a += t.v[j].x * t.v[(j + 1) % 3].y - t.v[(j + 1) % 3].x * t.v[j].y;
-      a *= -0.5f;
-      if (a == 0) continue;
-      t.front = P.front == VK_FRONT_FACE_COUNTER_CLOCKWISE ? a > 0 : a < 0;
-      if ((P.cull & VK_CULL_MODE_FRONT_BIT) && t.front) continue;
-      if ((P.cull & VK_CULL_MODE_BACK_BIT) && !t.front) continue;
-      stris.push_back(std::move(t));
+      const float* tri[3] = {poly[0].data(), poly[k].data(), poly[k + 1].data()};
+      emit(tri);
     }
   }
+  gStats.setupNs += nsSince(tSetup);
+  gStats.tris += stris.size();
   if (stris.empty()) return;
+  auto tRaster = sclk::now();
+  struct RasterTimer { sclk::time_point t; ~RasterTimer() { gStats.fsNs += nsSince(t); } } rasterTimer{tRaster};
   // ---- rasterization: horizontal bands per thread, 4x2 pixel blocks ----
   RenderPass& rp = *ex.rp;
   ImageView* depthView = rp.depth >= 0 ? ex.fb->views[rp.depth] : nullptr;
@@ -586,8 +629,9 @@ void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t instanc
             for (uint32_t c = 0; c < nc; ++c)
               for (int l = 0; l < 8; ++l) {
                 const float w = 1.0f / qn[l];
-                dst[c * 8 + l] = (l0[l] * t.var[0][im.second + c] + l1[l] * t.var[1][im.second + c] +
-                                  l2[l] * t.var[2][im.second + c]) * w;
+                const float* tv = varPool.data() + t.var;
+                dst[c * 8 + l] = (l0[l] * tv[im.second + c] + l1[l] * tv[K + im.second + c] +
+                                  l2[l] * tv[2 * K + im.second + c]) * w;
               }
           }
           if (fragCoordVar >= 0) {
@@ -600,6 +644,7 @@ void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t instanc
             uint32_t* ff = reinterpret_cast<uint32_t*>(inv.input(uint32_t(frontVar)));
             for (int l = 0; l < 8; ++l) ff[l] = t.front;
           }
+          ++gStats.frags;
           inv.run(ex, 0xFF);  // helper lanes run too (derivatives)
           if (!inv.error.empty()) { missing("fragment shader: " + inv.error); return; }
           pass &= uint8_t(~inv.killed());

@@ -15,7 +15,7 @@ enum Op : uint16_t {
   OpTypeMatrix = 24, OpTypeImage = 25, OpTypeSampler = 26, OpTypeSampledImage = 27, OpTypeArray = 28,
   OpTypeRuntimeArray = 29, OpTypeStruct = 30, OpTypePointer = 32, OpTypeFunction = 33, OpConstantTrue = 41,
   OpConstantFalse = 42, OpConstant = 43, OpConstantComposite = 44, OpConstantNull = 46, OpSpecConstantTrue = 48,
-  OpSpecConstantFalse = 49, OpSpecConstant = 50, OpSpecConstantComposite = 51, OpFunction = 54,
+  OpSpecConstantFalse = 49, OpSpecConstant = 50, OpSpecConstantComposite = 51, OpSpecConstantOp = 52, OpFunction = 54,
   OpFunctionParameter = 55, OpFunctionEnd = 56, OpFunctionCall = 57, OpVariable = 59, OpLoad = 61, OpStore = 62,
   OpCopyMemory = 63, OpAccessChain = 65, OpInBoundsAccessChain = 66, OpDecorate = 71, OpMemberDecorate = 72,
   OpVectorExtractDynamic = 77, OpVectorInsertDynamic = 78, OpVectorShuffle = 79, OpCompositeConstruct = 80,
@@ -191,6 +191,11 @@ std::shared_ptr<Module> Module::parse(const uint32_t* w, size_t count, std::stri
         m->constVal[a[1]] = v;
         break;
       }
+      case OpSpecConstantOp:
+        m->resultType[a[1]] = a[0];
+        m->isConst[a[1]] = 1;
+        m->constVal[a[1]].assign(m->types[a[0]].comps, 0);
+        break;
       case OpConstantNull:
         m->resultType[a[1]] = a[0];
         m->isConst[a[1]] = 1;
@@ -235,6 +240,7 @@ std::shared_ptr<Module> Module::parse(const uint32_t* w, size_t count, std::stri
     i += wc;
   }
   if (eps.empty()) { err = "no entry point"; return nullptr; }
+  m->foldSpecOps();
   m->entryFunction = eps[0].fn;
   m->executionModel = eps[0].model;
   m->interfaceVars = eps[0].iface;
@@ -242,6 +248,54 @@ std::shared_ptr<Module> Module::parse(const uint32_t* w, size_t count, std::stri
 }
 
 bool Module::select(const std::string&) { return entryFunction != 0; }
+
+// Evaluates OpSpecConstantOp (scalar integer / boolean / float ops) in module order.
+void Module::foldSpecOps() {
+  const uint32_t* w = words.data();
+  for (const Inst& in : insts) {
+    if (in.op != OpSpecConstantOp) continue;
+    const uint32_t* a = w + in.at + 1;
+    const uint32_t op = a[2];
+    auto V = [&](int i) { const auto& c = constVal[a[3 + i]]; return c.empty() ? 0u : c[0]; };
+    const int32_t x = int32_t(V(0)), y = in.wc > 5 ? int32_t(V(1)) : 0;
+    uint32_t r = 0;
+    switch (op) {
+      case 126: r = uint32_t(-x); break;         // SNegate
+      case 128: r = uint32_t(x + y); break;      // IAdd
+      case 130: r = uint32_t(x - y); break;      // ISub
+      case 132: r = uint32_t(x * y); break;      // IMul
+      case 134: r = y ? V(0) / V(1) : 0; break;  // UDiv
+      case 135: r = y ? uint32_t(x / y) : 0; break;
+      case 137: r = y ? V(0) % V(1) : 0; break;
+      case 164: r = (x != 0) == (y != 0); break;
+      case 165: r = (x != 0) != (y != 0); break;
+      case 166: r = x || y; break;
+      case 167: r = x && y; break;
+      case 168: r = !x; break;
+      case 169: r = V(0) ? V(1) : V(2); break;  // Select
+      case 170: r = x == y; break;
+      case 171: r = x != y; break;
+      case 172: r = V(0) > V(1); break;
+      case 173: r = x > y; break;
+      case 174: r = V(0) >= V(1); break;
+      case 175: r = x >= y; break;
+      case 176: r = V(0) < V(1); break;
+      case 177: r = x < y; break;
+      case 178: r = V(0) <= V(1); break;
+      case 179: r = x <= y; break;
+      case 194: r = V(0) >> (V(1) & 31); break;
+      case 195: r = uint32_t(x >> (V(1) & 31)); break;
+      case 196: r = V(0) << (V(1) & 31); break;
+      case 197: r = V(0) | V(1); break;
+      case 198: r = V(0) ^ V(1); break;
+      case 199: r = V(0) & V(1); break;
+      case 200: r = ~V(0); break;
+      case 113: case 114: r = V(0); break;  // UConvert / SConvert
+      default: unsupported.push_back("OpSpecConstantOp " + std::to_string(op)); break;
+    }
+    constVal[a[1]] = {r};
+  }
+}
 
 void Module::specialize(const std::vector<std::array<uint32_t, 3>>& entries, const uint8_t* data) {
   for (uint32_t id = 0; id < bound; ++id) {
@@ -255,6 +309,7 @@ void Module::specialize(const std::vector<std::array<uint32_t, 3>>& entries, con
         constVal[id] = {v};
       }
   }
+  foldSpecOps();
   // Re-derive composite spec constants from their (possibly patched) parts.
   const uint32_t* w = words.data();
   for (const Inst& in : insts)
@@ -316,13 +371,13 @@ Invocation::Invocation(const Module& m) : m_(m) {
       ptr_[id].var = id;
       ptr_[id].type = v.type;
       isPtr_[id] = 1;
+      if (v.storage != Input && !storage_[id].empty()) resettable_.push_back(id);
     }
   }
 }
 
 void Invocation::resetStorage() {
-  for (uint32_t id = 0; id < m_.bound; ++id)
-    if (m_.isVar[id] && m_.vars[id].storage != Input && !storage_[id].empty()) {
+  for (uint32_t id : resettable_) {
       std::fill(storage_[id].begin(), storage_[id].end(), 0u);
       if (m_.vars[id].initializer) {
         const auto& c = m_.constVal[m_.vars[id].initializer];
@@ -417,15 +472,24 @@ float sampleTexture(const Texture& tx, float s, float t, float lod, int ch) {
 }
 }  // namespace
 
-bool Invocation::exec(const Resources& res, uint8_t mask, bool scalar, int lane) {
+bool Invocation::exec(const Resources& res, uint8_t mask0, bool scalar, int lane) {
+  uint8_t mask = mask0;  // active lanes (changes inside divergent selections)
   const Module& m = m_;
   const uint32_t* W = m.words.data();
   struct Frame { int ret; uint32_t result; uint32_t prevBlock, curBlock; };
-  std::vector<Frame> stack;
+  static thread_local std::vector<Frame> stack;
+  stack.clear();
   int pc = m.functionInst[m.entryFunction];
   if (pc < 0) { error = "entry function not found"; return false; }
   uint32_t prevBlock = 0, curBlock = 0;
-  std::vector<uint32_t> pendingArgs;
+  // Masked execution of divergent if/else (structured selections).
+  struct Sel { uint32_t merge, falseTarget; uint8_t falseMask, outerMask; bool falseDone; size_t depth; };
+  static thread_local std::vector<Sel> sel;
+  sel.clear();
+  uint32_t lanePrev[L] = {};
+  uint32_t pendingMerge = 0;  // label of the OpSelectionMerge just before a branch (0: none / loop)
+  static thread_local std::vector<uint32_t> pendingArgs;
+  pendingArgs.clear();
   size_t argPos = 0;
   auto lanesOf = [&](uint32_t id, std::vector<uint32_t>& v) -> std::vector<uint32_t>& { (void)id; return v; };
   (void)lanesOf;
@@ -441,7 +505,7 @@ bool Invocation::exec(const Resources& res, uint8_t mask, bool scalar, int lane)
     while (t->kind == Kind::Vector || t->kind == Kind::Matrix || t->kind == Kind::Array) t = &m.types[t->elem];
     return t->kind == Kind::Int ? (t->sign ? 1 : 2) : t->kind == Kind::Bool ? 3 : 0;  // 0 float, 1 sint, 2 uint, 3 bool
   };
-  auto laneBool = [&](uint32_t id, int l) { return val_[id][l] != 0; };
+  auto laneBool = [&](uint32_t id, int l) { return !val_[id].empty() && val_[id][l] != 0; };
   auto uniformBool = [&](uint32_t id, bool& value) {
     if (scalar) { value = laneBool(id, lane); return true; }
     int seen = -1;
@@ -459,8 +523,24 @@ bool Invocation::exec(const Resources& res, uint8_t mask, bool scalar, int lane)
     const uint32_t* a = W + in.at + 1;
     const int wc = in.wc;
     switch (in.op) {
-      case OpLabel: prevBlock = curBlock; curBlock = a[0]; break;
-      case OpNop: case OpLine: case OpNoLine: case OpSelectionMerge: case OpLoopMerge: case OpName: break;
+      case OpLabel:
+        prevBlock = curBlock;
+        curBlock = a[0];
+        if (!sel.empty() && sel.back().merge == a[0] && sel.back().depth == stack.size()) {
+          Sel& sc = sel.back();
+          if (!sc.falseDone && sc.falseMask) {  // run the other side of the if/else
+            sc.falseDone = true;
+            mask = sc.falseMask;
+            pc = m.labelInst[sc.falseTarget] - 1;
+            break;
+          }
+          mask = sc.outerMask;  // reconverge
+          sel.pop_back();
+        }
+        break;
+      case OpSelectionMerge: pendingMerge = a[0]; break;
+      case OpLoopMerge: pendingMerge = 0; break;
+      case OpNop: case OpLine: case OpNoLine: case OpName: break;
       case OpFunctionParameter: {
         const uint32_t id = a[1];
         const uint32_t src = argPos < pendingArgs.size() ? pendingArgs[argPos++] : 0;
@@ -531,8 +611,14 @@ bool Invocation::exec(const Resources& res, uint8_t mask, bool scalar, int lane)
           for (int l = 0; l < L; ++l) v[l] = p.var;
         } else if (var && isBufferStorage(var->storage)) {
           const uint8_t* base = var->storage == PushConstant ? res.pushConstants : res.buffer(var->set, var->binding);
-          std::vector<uint32_t> offs;
-          layout(m, p.type, 0, p.matrixStride, p.rowMajor, offs);
+          const uint64_t key = uint64_t(p.type) | (uint64_t(p.matrixStride) << 32) | (uint64_t(p.rowMajor) << 62);
+          auto it = layoutCache_.find(key);
+          if (it == layoutCache_.end()) {
+            std::vector<uint32_t> o;
+            layout(m, p.type, 0, p.matrixStride, p.rowMajor, o);
+            it = layoutCache_.emplace(key, std::move(o)).first;
+          }
+          const std::vector<uint32_t>& offs = it->second;
           for (uint32_t k = 0; k < c; ++k)
             for (int l = 0; l < L; ++l) {
               uint32_t x = 0;
@@ -972,15 +1058,45 @@ bool Invocation::exec(const Resources& res, uint8_t mask, bool scalar, int lane)
       }
       case OpPhi: {
         auto& v = ensure(a[1]);
-        for (int k = 2; k + 1 < wc - 1; k += 2)
-          if (a[k + 1] == prevBlock) { v = val_[a[k]]; break; }
+        const uint32_t c = comps(a[1]);
+        for (int l = 0; l < L; ++l) {
+          const uint32_t from = scalar ? prevBlock : lanePrev[l];
+          for (int k = 2; k + 1 < wc - 1; k += 2)
+            if (a[k + 1] == from) {
+              const auto& src = val_[a[k]];
+              if (src.size() >= size_t(c) * L)
+                for (uint32_t q = 0; q < c; ++q) v[q * L + l] = src[q * L + l];
+              break;
+            }
+        }
         break;
       }
-      case OpBranch: pc = m.labelInst[a[0]] - 1; break;
+      case OpBranch:
+        for (int l = 0; l < L; ++l) if (mask & (1 << l)) lanePrev[l] = curBlock;
+        pendingMerge = 0;
+        pc = m.labelInst[a[0]] - 1;
+        break;
       case OpBranchConditional: {
+        for (int l = 0; l < L; ++l) if (mask & (1 << l)) lanePrev[l] = curBlock;
         bool b;
-        if (!uniformBool(a[0], b)) return false;  // divergent: caller re-runs per lane
-        pc = m.labelInst[b ? a[1] : a[2]] - 1;
+        const uint32_t merge = pendingMerge;
+        pendingMerge = 0;
+        if (uniformBool(a[0], b)) {
+          pc = m.labelInst[b ? a[1] : a[2]] - 1;
+          break;
+        }
+        if (!merge) return false;  // divergent loop: caller re-runs per lane
+        uint8_t tm = 0;
+        for (int l = 0; l < L; ++l) if ((mask & (1 << l)) && laneBool(a[0], l)) tm |= uint8_t(1 << l);
+        const uint8_t fm = uint8_t(mask & ~tm);
+        uint32_t first = a[1], second = a[2];
+        uint8_t firstMask = tm, secondMask = fm;
+        if (first == merge) { std::swap(first, second); std::swap(firstMask, secondMask); }
+        // If the other side is the merge block itself, those lanes just wait there.
+        const bool secondIsMerge = second == merge;
+        sel.push_back({merge, second, secondMask, mask, secondIsMerge, stack.size()});
+        mask = firstMask;
+        pc = m.labelInst[first] - 1;
         break;
       }
       case OpSwitch: {
@@ -999,8 +1115,13 @@ bool Invocation::exec(const Resources& res, uint8_t mask, bool scalar, int lane)
       }
       case OpKill:
         killed_ |= mask;
-        return true;
+        if (sel.empty()) return true;
+        // Killed lanes stop; continue the selection at its merge (they stay masked by killed_).
+        mask = 0;
+        pc = m.labelInst[sel.back().merge] - 1;
+        break;
       case OpReturn: case OpReturnValue: case OpUnreachable:
+        if (!sel.empty() && sel.back().depth >= stack.size() && !scalar) return false;  // return inside divergent if
         if (stack.empty()) return true;
         if (in.op == OpReturnValue && stack.back().result) ensure(stack.back().result) = val_[a[0]];
         pc = stack.back().ret;

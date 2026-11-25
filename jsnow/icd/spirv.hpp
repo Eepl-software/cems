@@ -6,6 +6,7 @@
 #include <memory>
 #include <array>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace spv {
@@ -88,6 +89,8 @@ class Invocation {
   std::vector<std::vector<uint32_t>> val_;      // SSA values [comp*L + lane]
   std::vector<std::vector<uint32_t>> storage_;  // variable storage (private classes)
   std::vector<Ptr> ptr_;
+  std::unordered_map<uint64_t, std::vector<uint32_t>> layoutCache_;
+  std::vector<uint32_t> resettable_;  // variables whose storage is reset per run  // buffer component offsets per type
   std::vector<int> isPtr_;
   uint8_t killed_ = 0;
 };
@@ -123,6 +126,7 @@ class Module {
   std::vector<std::string> unsupported;  // opcodes seen at parse time that exec() does not handle
   std::vector<int32_t> specId;  // id -> SpecId decoration (-1: none)
   // Applies VkSpecializationInfo-style entries (specId, byte offset, size) over `data`.
+  void foldSpecOps();
   void specialize(const std::vector<std::array<uint32_t, 3>>& entries, const uint8_t* data);
 
  private:
