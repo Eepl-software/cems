@@ -210,6 +210,31 @@ Feature costs measured by switching each off (baseline, 100 frames, before DB1):
 | DB2 | bloom: SIMD fused bright pass (column sums over f rows, 8 lanes), tone-map computes only the bloom row and adds it in the SIMD loop. Bloom ~3 → ~1.7 ms | 36.14 → ~35.1 (2 runs 34.9/35.7 vs 36.1) | ~3% (<10%) | – | – |
 | DB1 | static shadow caching: scene and sun are static, so a cascade is re-rendered only when its cached map stops covering the current frustum slice (c0 margin 12%, c1/c2 15%) instead of on a schedule. Frame 120/149 vs always-updated maps: 94.8/95.0 dB. Dynamic objects would need invalidation (not modelled). `JSNOW_SHADOW_STAGGER=1` restores B2 | 46.41 → 36.14 | 22% | 13.96 → 10.08 | 28% |
 
+## Phase E: JSNOW as a Vulkan driver (`icd/`)
+`libjsnow_icd.so` + generated `build/jsnow_icd.json`. Run any Vulkan app on it with
+`VK_DRIVER_FILES=$PWD/build/jsnow_icd.json` (Xvfb works: `Xvfb :99 &; DISPLAY=:99`).
+Env: `JSNOW_ICD_STATS=1` (avg submit time), `JSNOW_ICD_NO_PRESENT=1`,
+`JSNOW_ICD_DUMP=/path/frame.ppm:N` (dump N-th presented frame), `JSNOW_ICD_THREADS=n`,
+`JSNOW_ICD_MISSING_LOG=file` (append unsupported features hit at runtime).
+
+Design: loader interface v2 (loader owns xcb surfaces); dispatchable handles carry the
+loader magic; one memory type (host RAM, coherent), linear images; command buffers are
+recorded as closures and executed synchronously in vkQueueSubmit (fences signal
+immediately); generic Vulkan rasterizer (clip z∈[0,w] + guard band, viewport, Vulkan
+area/front-face rules, cull, depth compare ops, blending ADD, perspective-correct
+varyings), fragments in 4x2 blocks with helper lanes for derivatives, horizontal bands
+across the thread pool; presentation via `xcb_put_image`.
+SPIR-V (`icd/spirv.cpp`): parser + interpreter executing 8 invocations per step (8
+vertices or a 4x2 pixel block). Values are 8-lane arrays; pointers carry per-lane
+offsets (dynamic indexing), std140/430 buffer layouts from decorations, GLSL.std.450
+subset, derivatives from lane neighbours, OpFunctionCall, structured branches (uniform
+→ vector; divergent → automatic re-run one lane at a time), OpKill, OpPhi, sampling with
+implicit LOD (bilinear, nearest mip).
+
+| app | resolution | FPS | ms/frame | status |
+|---|---|---:|---:|---|
+| vkcube (Vulkan-Tools 1.3.275) | 500x500 | 137 | 7.3 (7.26 in vkQueueSubmit) | renders correctly (frame 30 checked: textured, lit via dFdx/dFdy normals, depth-tested); presentation ≈0.1 ms |
+
 ## Done
 - Session 1: tiled AVX2 rasterizer, half/checker/reuse tricks, benchmark harness.
 - A1: `--fast`.
@@ -223,3 +248,4 @@ Feature costs measured by switching each off (baseline, 100 frames, before DB1):
   baseline 44.57 → 18.91 ms (2.36x), fast 13.38 → 6.48 ms (2.06x).
   Remaining profile (baseline): tile shading ~8 ms, visibility raster ~4.5 ms, shadow passes 4.4, setup 1.7.
 - Phase D-B round 3 (counter 1 after DB2): profile tile shading on the 5M scene.
+- Phase E: next = official Vulkan samples, then a free 3D game; log missing features.

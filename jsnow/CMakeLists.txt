@@ -47,3 +47,16 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 elseif(MSVC)
   target_compile_options(jsnow PRIVATE /O2 /arch:AVX2)
 endif()
+
+# ---- Phase E: JSNOW as a Vulkan driver (ICD) ----
+option(JSNOW_BUILD_ICD "Build the JSNOW Vulkan ICD (needs Vulkan headers + xcb)" ON)
+find_path(VULKAN_ICD_HEADER vulkan/vk_icd.h)
+find_library(XCB_LIB xcb)
+if(JSNOW_BUILD_ICD AND VULKAN_ICD_HEADER AND XCB_LIB)
+  add_library(jsnow_icd SHARED icd/icd.cpp icd/spirv.cpp)
+  target_compile_options(jsnow_icd PRIVATE -O2 -fvisibility=hidden -Wall)
+  target_link_libraries(jsnow_icd PRIVATE ${XCB_LIB} Threads::Threads)
+  set_target_properties(jsnow_icd PROPERTIES PREFIX "lib")
+  file(GENERATE OUTPUT ${CMAKE_BINARY_DIR}/jsnow_icd.json CONTENT
+"{\n  \"file_format_version\": \"1.0.0\",\n  \"ICD\": {\n    \"library_path\": \"$<TARGET_FILE:jsnow_icd>\",\n    \"api_version\": \"1.0.0\"\n  }\n}\n")
+endif()
