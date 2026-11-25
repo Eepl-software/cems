@@ -701,6 +701,15 @@ void clearAttachment(ImageView* v, const VkClearValue& cv, const VkRect2D& r) {
 void present(Swapchain* sc, Image* im) {
   static const bool skip = std::getenv("JSNOW_ICD_NO_PRESENT") != nullptr;
   ++sc->presented;
+  if (std::getenv("JSNOW_ICD_STATS")) {
+    static auto last = std::chrono::steady_clock::now();
+    if (sc->presented % 50 == 0) {
+      const auto now = std::chrono::steady_clock::now();
+      std::fprintf(stderr, "[jsnow-icd] presented %llu frames, last 50 at %.2f FPS\n", (unsigned long long)sc->presented,
+                   50.0 / std::chrono::duration<double>(now - last).count());
+      last = now;
+    }
+  }
   if (const char* dump = std::getenv("JSNOW_ICD_DUMP")) {  // "path.ppm:frame"
     std::string s(dump);
     const size_t c = s.rfind(':');
@@ -746,7 +755,8 @@ using namespace icd;
 // =================================================================== API
 #define VKAPI extern "C" VKAPI_ATTR
 static const VkExtensionProperties kInstanceExts[] = {{VK_KHR_SURFACE_EXTENSION_NAME, 25},
-                                                      {VK_KHR_XCB_SURFACE_EXTENSION_NAME, 6}};
+                                                      {VK_KHR_XCB_SURFACE_EXTENSION_NAME, 6},
+                                                      {VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME, 2}};
 static const VkExtensionProperties kDeviceExts[] = {{VK_KHR_SWAPCHAIN_EXTENSION_NAME, 70},
                                                     {VK_KHR_MAINTENANCE_1_EXTENSION_NAME, 2}};
 
@@ -760,7 +770,7 @@ static VkResult fillArray(uint32_t* count, T* out, const T* src, uint32_t n) {
 }
 
 VKAPI VkResult VKAPI_CALL jsnow_EnumerateInstanceExtensionProperties(const char*, uint32_t* c, VkExtensionProperties* p) {
-  return fillArray(c, p, kInstanceExts, 2);
+  return fillArray(c, p, kInstanceExts, 3);
 }
 VKAPI VkResult VKAPI_CALL jsnow_EnumerateInstanceVersion(uint32_t* v) { *v = VK_API_VERSION_1_1; return VK_SUCCESS; }
 VKAPI VkResult VKAPI_CALL jsnow_CreateInstance(const VkInstanceCreateInfo*, const VkAllocationCallbacks*, VkInstance* out) {

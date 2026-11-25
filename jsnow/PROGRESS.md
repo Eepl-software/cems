@@ -236,6 +236,75 @@ implicit LOD (bilinear, nearest mip).
 | app | resolution | FPS | ms/frame | status |
 |---|---|---:|---:|---|
 | vkcube (Vulkan-Tools 1.3.275) | 500x500 | 137 | 7.3 (7.26 in vkQueueSubmit) | renders correctly (frame 30 checked: textured, lit via dFdx/dFdy normals, depth-tested); presentation ≈0.1 ms |
+| Sascha Willems `triangle` | 1280x720 | 59-76 | 13-17 | renders correctly (needed Vulkan 1.1 core) |
+| vkQuake 1.30.1 + LibreQuake e1m1 (free assets, built locally) | 1280x720 | – | – | **blocked**: `vkCreateComputePipelines` (cs_tex_warp); also needs multiple subpasses, texel buffers |
+
+### Official-style Vulkan samples (Sascha Willems' examples, 31 tested; run 3 after E3/E4)
+"no frame presented" = fewer than 10 frames in the 4 s benchmark window (too slow, not wrong).
+FPS from the examples' own `-b` benchmark mode (1280x720, includes presentation).
+Khronos' Vulkan-Samples (the official set) need Vulkan 1.1 + ~20 submodules (VMA, glfw,
+tracy, OpenCL headers, ...); Sascha Willems' examples were used as the practical set.
+
+| example | status | FPS | missing features hit |
+|---|---|---:|---|
+| triangle | runs | 74.1104 | – |
+| pipelines | runs | 4.8077 | dynamic state 2 |
+| descriptorsets | runs | 22.5607 | – |
+| dynamicuniformbuffer | runs | 18.1600 | – |
+| pushconstants | runs | 23.2044 | – |
+| specializationconstants | runs | 7.3457 | dynamic state 2 |
+| texture | runs | 23.8670 | – |
+| texturearray | runs | 30.2004 | – |
+| texturecubemap | runs | 10.4942 | – |
+| texturemipmapgen | runs | 7.1776 | separate images/samplers (bound per binding only) |
+| gltfloading | runs | 9.1491 | – |
+| gltfskinning | runs | 43.3333 | – |
+| gltfscenerendering | runs, no frame presented | 0.9482 | – |
+| instancing | runs, no frame presented | 0.3946 | – |
+| indirectdraw | runs, no frame presented | 0.0741 | – |
+| offscreen | runs, no frame presented | 0.6939 | – |
+| shadowmapping | runs, no frame presented | 1.2006 | depth bias; dynamic state 3; vkCmdSetDepthBias |
+| shadowmappingcascade | runs, no frame presented | 0.0928 | – |
+| deferred | runs, no frame presented | 0.7474 | – |
+| ssao | runs, no frame presented | 0.1630 | – |
+| hdr | runs, no frame presented | 0.4296 | – |
+| bloom | runs, no frame presented | 1.6717 | – |
+| multisampling | runs | 13.4339 | – |
+| particlesystem | runs | 9.7462 | primitive topology 0 |
+| computeshader | fails (exit 255), no frame presented | – | compute pipelines; descriptor type 3 |
+| stencilbuffer | runs | 17.4905 | stencil test |
+| occlusionquery | runs | 11.0522 | – |
+| radialblur | runs, no frame presented | 0.5112 | – |
+| multithreading | runs, no frame presented | 0.6732 | – |
+| pbrbasic | runs, no frame presented | 0.5448 | – |
+| negativeviewportheight | runs | 21.0151 | – |
+
+Round history: run 1 (E2) 22/31 run, 6 crash (missing core entry points → null function
+pointers), 2 fail. Run 2 (E3: queries, indirect draws, events, buffer views, resolve, MRT,
+RGBA16F/R8/depth sampling, spec constants, MatrixInverse, image size queries,
+maintenance1) 26/31. Run 3 (E4: OpSpecConstantOp folding, masked if/else, layout cache,
+parallel VS, allocation-free setup) 30/31 (only `computeshader`). Speed-ups E3→E4:
+gltfloading 4.0→9.1 FPS, pushconstants 8.6→23.2, pbrbasic 0.25→0.54, multithreading
+0.25→0.67.
+
+### Missing features, ordered by how much they block
+1. **Shader interpreter speed** — 17/31 examples < 2 FPS. Example: shadowmapping spends
+   3.9 s of 4 s in raster+FS (~8.7 µs per 8-pixel block). Interpreting SPIR-V costs
+   ~100-1000x a native kernel. Fix: JIT SPIR-V → native SIMD (LLVM or a custom x86/ARM
+   emitter), like SwiftShader (Reactor) or lavapipe (gallivm).
+2. **Compute pipelines** (GLCompute model, workgroups, shared memory, barriers, storage
+   buffer/image writes, atomics) — blocks `computeshader`, vkQuake, and every modern game.
+3. Multiple subpasses / input attachments (vkQuake, deferred renderers).
+4. Texel buffers (uniform/storage texel buffer reads/writes) (vkQuake).
+5. Stencil test (stencilbuffer renders without it), depth bias (shadow acne in shadowmapping),
+   points/lines topology (particlesystem), separate sampled images + samplers
+   (texturemipmapgen), divergent loops (fall back to 8x per-lane re-run), early returns
+   inside divergent branches, MSAA (rendered single-sampled), blend ops other than ADD,
+   BC/ETC/ASTC texture compression, dynamic rendering, Vulkan 1.2/1.3 core
+   (timeline semaphores, buffer device address, descriptor indexing, sync2) — DXVK and
+   VKD3D-Proton require these, so no DX11/DX12 game can start yet.
+
+
 
 ## Done
 - Session 1: tiled AVX2 rasterizer, half/checker/reuse tricks, benchmark harness.
@@ -253,4 +322,4 @@ implicit LOD (bilinear, nearest mip).
   46.4 → ~35-36 ms (DB1 static shadow caching was the only big win). Remaining profile
   (callgrind, per frame): tile raster + G-buffer resolve ~55%, lighting ~12%, triangle
   setup ~11%, shadow lookups ~6%, TAA ~7%, vertex ~6%, tone map ~4%.
-- Phase E: next = official Vulkan samples, then a free 3D game; log missing features.
+- Phase E next: compute pipelines, then a SPIR-V JIT (the dominant performance blocker).
