@@ -56,6 +56,8 @@ Tools installed in the session (needed again in a fresh container):
 | D4 LOD streaming `--stream` 64 MB (shadow 9.6, post 6.5) | baseline | 21.5 | 46.41 | 99.0 vs fully resident | 1.26 | 2.88 | 24.85 | – | – | – | raster+shade 24.9 |
 | D4 LOD streaming `--stream` 64 MB (shadow 4.7, post 1.2) | fast | 71.6 | 13.96 | 29.0 | 0.61 | 1.25 | 4.90 | 0.43 | – | 0.38 | raster+shade 4.9, shadow 4.7 |
 | D4 `--stream --stream-budget 16` (thrashing) | baseline | 22.4 | 44.73 | 45.2 vs fully resident | 1.21 | 2.44 | 23.55 | – | – | – | 5.7% of LOD picks fall back |
+| DB1 static shadow caching (shadow 0.6, post 6.4) | baseline | 27.7 | 36.14 | ref | 1.30 | 2.75 | 23.88 | – | – | – | raster+shade 23.9 |
+| DB1 static shadow caching (shadow 0.5, post 1.3) | fast | 99.3 | 10.08 | 29.0 | 0.63 | 1.27 | 4.94 | 0.42 | – | 0.39 | raster+shade 4.9 |
 
 ## Decisions log
 - A1: `--fast` = half resolution + reuse (best trade-off found in session 1).
@@ -199,6 +201,14 @@ B2 quality cost: frame 150 / 297 vs always-updated cascades = 99.0 / 98.2 dB
 (`JSNOW_SHADOW_NOCACHE=1` disables caching; `JSNOW_SHADOW_DEBUG=1` prints shadow sub-stages).
 Quality pass now renders the reference every frame so its caches stay in step.
 
+## Phase D-B: Phase B repeated on the 5M scene
+Feature costs measured by switching each off (baseline, 100 frames, before DB1): shadows
+~15 ms (passes 10 + lookups), transparency ~6.5, TAA ~6, bloom ~6.5, point lights ~5.5.
+
+| round | change | baseline ms before → after | gain | fast ms before → after | gain |
+|---|---|---|---:|---|---:|
+| DB1 | static shadow caching: scene and sun are static, so a cascade is re-rendered only when its cached map stops covering the current frustum slice (c0 margin 12%, c1/c2 15%) instead of on a schedule. Frame 120/149 vs always-updated maps: 94.8/95.0 dB. Dynamic objects would need invalidation (not modelled). `JSNOW_SHADOW_STAGGER=1` restores B2 | 46.41 → 36.14 | 22% | 13.96 → 10.08 | 28% |
+
 ## Done
 - Session 1: tiled AVX2 rasterizer, half/checker/reuse tricks, benchmark harness.
 - A1: `--fast`.
@@ -211,5 +221,4 @@ Quality pass now renders the reference every frame so its caches stay in step.
 - **Phase B stopped after B7**: B5, B6, B7 each gained <10% (stop rule). Phase B total:
   baseline 44.57 → 18.91 ms (2.36x), fast 13.38 → 6.48 ms (2.06x).
   Remaining profile (baseline): tile shading ~8 ms, visibility raster ~4.5 ms, shadow passes 4.4, setup 1.7.
-- Phase D2-B (repeat of Phase B on the 5M scene): targets raster+shade ~25 ms (tile shading),
-  shadows ~9.7 ms, post ~6.7 ms (TAA ~3.5, bloom ~2.5), setup ~2.9, cull ~1.3.
+- Phase D-B round 2: post (TAA ~3.3 ms, bloom ~3 ms incl. fused bright pass) or tile shading.

@@ -50,11 +50,18 @@ void ShadowMaps::update(const Camera& cam, Vec3 L, StageTimes& st) {
     float r = 0;
     for (const Vec3& p : corners) r = std::max(r, std::sqrt(dot(p - center, p - center)));
     r = std::ceil(r);  // stable size -> stable texel footprint
+    // Static scene + static sun: a cached cascade stays exact for as long as it
+    // covers the current slice, so it is only re-rendered when coverage fails
+    // ("static shadow caching", like cached virtual shadow-map pages).
+    // JSNOW_SHADOW_STAGGER=1 restores the B2 schedule (c0 every frame, c1/c2 every
+    // 2nd/4th); JSNOW_SHADOW_NOCACHE=1 renders every cascade every frame.
+    static const bool stagger = std::getenv("JSNOW_SHADOW_STAGGER") != nullptr;
     static constexpr int kPeriod[kCascades] = {1, 2, 4};
     static constexpr int kPhase[kCascades] = {0, 1, 2};
-    static constexpr float kMargin[kCascades] = {1.0f, 1.15f, 1.15f};
+    static const float kMargin[kCascades] = {stagger ? 1.0f : 1.12f, 1.15f, 1.15f};
     static const bool noCache = std::getenv("JSNOW_SHADOW_NOCACHE") != nullptr;
-    if (!noCache && valid_[c] && (calls_ % kPeriod[c]) != kPhase[c] % kPeriod[c]) {
+    const bool periodic = stagger ? (calls_ % kPeriod[c]) == kPhase[c] % kPeriod[c] : false;
+    if (!noCache && valid_[c] && !periodic) {
       // Keep the cached map if it still contains this slice's bounding sphere
       // (measured in the light's image plane).
       const Vec3 d = center - cachedCenter_[c];
