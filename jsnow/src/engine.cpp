@@ -1,5 +1,6 @@
 #include "engine.hpp"
 
+#include "occlusion.hpp"
 #include "shadow.hpp"
 
 #include <chrono>
@@ -67,15 +68,25 @@ Engine::Engine(ThreadPool& pool, const Scene& scene, Options o)
     shadows_ = std::make_unique<ShadowMaps>(pool, scene);
     shadows_->clusterCull = o.meshlets;
   }
+  if (o.occlusion) occlusion_ = std::make_unique<OcclusionCuller>(pool, scene);
 }
 
 Engine::~Engine() = default;
 
 void Engine::renderScene(const Camera& cam, const Viewport& vp, int w, int h, std::vector<float>* hdr, float* depth,
                          uint32_t* ldr, StageTimes& st) {
+  if (occlusion_) {
+    if (o_.occlusionPrepass) occlusion_->build(cam, st);
+    else occlusionReady_ = false;
+    if (!o_.occlusionPrepass && occlusionDepth_) {
+      occlusion_->buildFromDepth(occlusionDepth_, occlusionW_, occlusionH_, prevCam_, cam, st);
+      occlusionReady_ = true;
+    }
+  }
   auto a = clk::now();
   cullStats_ = buildDrawList(scene_, cam.viewProj, cam.pos, lodPixelScale(cam), true, 0, draws_,
-                             o_.transparency ? &transparentDraws_ : nullptr, nullptr, o_.meshlets);
+                             o_.transparency ? &transparentDraws_ : nullptr, nullptr, o_.meshlets,
+                             (occlusion_ && (o_.occlusionPrepass || occlusionReady_)) ? occlusion_.get() : nullptr);
   submitted_ = cullStats_.triangles;
   st.cull += ms(a, clk::now());
   if (shadows_) shadows_->update(cam, sunDirection(), st);
@@ -123,7 +134,7 @@ const uint32_t* Engine::renderFrame(int f, StageTimes& st) {
   const bool temporal = o_.checker || o_.reuse;
   const bool taa = o_.taa && !o_.checker;
   const int cur = ((o_.reuse || taa) && f > 0) ? (hist_ ^ 1) : hist_;
-  const bool needDepth = o_.reuse || taa;
+  const bool needDepth = o_.reuse || taa || o_.occlusion;
   auto renderFull = [&](int i) {
     if (!taa) {
       renderScene(cam, Viewport::full(W_, H_), W_, H_, hdr_, needDepth ? depth_[i].data() : nullptr, color_[i].data(), st);
@@ -174,6 +185,10 @@ const uint32_t* Engine::renderFrame(int f, StageTimes& st) {
   }
   hist_ = cur;
   prevCam_ = cam;
+  // Last displayed depth (rendered or reprojected) feeds next frame's occlusion test.
+  // Checker frames only refresh a quarter of the depth: use it only with reuse.
+  occlusionDepth_ = (o_.occlusion && (!o_.checker || o_.reuse)) ? depth_[cur].data() : nullptr;
+  occlusionW_ = W_; occlusionH_ = H_;
 
   const uint32_t* result = color_[cur].data();
   if (o_.half) {

@@ -90,7 +90,7 @@ Scene buildScene(ThreadPool& pool, SceneKind kind, int textureSize = 2048, int p
 // meshlet frustum + normal-cone back-face culling (orthoDir = view direction of
 // an orthographic pass, e.g. the shadow camera). Returns submitted triangles.
 struct CullStats {
-  int objectsVisible = 0;
+  int objectsVisible = 0, objectsOccluded = 0;
   size_t triangles = 0;
   size_t clustersTested = 0, clustersBackface = 0, clustersOccluded = 0;
 };
@@ -102,6 +102,7 @@ constexpr float kLodTargetPx = 5.0f;
 CullStats buildDrawList(const Scene& s, const Mat4& viewProj, Vec3 lodEye, float pixelsPerUnitAt1m,
                         bool cullNear, int lodBias, std::vector<DrawItem>& out,
                         std::vector<DrawItem>* transparentOut = nullptr, const Vec3* orthoDir = nullptr,
-                        bool clusterCull = true);
+                        bool clusterCull = true, const class OcclusionCuller* occlusion = nullptr,
+                        bool occludersOnly = false);
 
 }  // namespace jsnow

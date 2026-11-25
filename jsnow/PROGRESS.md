@@ -51,6 +51,8 @@ Tools installed in the session (needed again in a fresh container):
 | D1 5M tris (shadow 5.2, post 1.4) | fast | 63.7 | 15.69 | 29.0 | 0.77 | 1.67 | 5.76 | 0.44 | – | 0.48 | raster+shade 5.8, shadow 5.2 |
 | D2 meshlets (shadow 9.8, post 6.8) | baseline | 20.7 | 48.20 | ref | 1.42 | 3.27 | 26.71 | – | – | – | raster+shade 26.7 |
 | D2 meshlets (shadow 4.6, post 1.3) | fast | 72.5 | 13.79 | 29.0 | 0.62 | 1.38 | 5.08 | 0.41 | – | 0.36 | raster+shade 5.1, shadow 4.6 |
+| D3 HiZ occlusion (shadow 9.9, post 7.0, cull 1.3) | baseline | 20.6 | 48.58 | ref | 1.37 | 3.02 | 25.98 | – | – | – | raster+shade 26.0 (pixel shading, not triangles) |
+| D3 HiZ occlusion (shadow 4.6, post 1.2, cull 0.5) | fast | 72.4 | 13.81 | 29.0 | 0.59 | 1.24 | 4.86 | 0.43 | – | 0.38 | raster+shade 4.9, shadow 4.6 |
 
 ## Decisions log
 - A1: `--fast` = half resolution + reuse (best trade-off found in session 1).
@@ -146,6 +148,22 @@ Tools installed in the session (needed again in a fresh container):
   setup was already rejecting those triangles cheaply, and only ~5% of clusters are
   cone-culled (terrain faces the camera; coarse tower/sphere LOD blocks span 120-240°).
   Meshlets are mainly the unit for D3's occlusion culling.
+- D3: hierarchical-Z occlusion culling (`occlusion.cpp`). HiZ = 480x272 min-depth
+  (= farthest) pyramid; object and meshlet spheres are projected (nearest-depth radius,
+  +10%), tested at the level where the footprint is <= 2x2 texels, and culled if their
+  nearest point is > 1 m behind the farthest occluder (margin for coarse occluders).
+  Three HiZ sources were tried:
+  1. occluder pre-pass (terrain chunks + towers at LOD2, depth-only raster at 480x272):
+     459 meshlets + 12 objects culled, but costs 3.75 ms → net loss (`--occlusion-prepass`);
+  2. last frame's depth re-projected into the current view by scatter: holes (= no
+     occluder) propagate up the min pyramid → only 154 meshlets culled
+     (`JSNOW_OCCLUSION_REPROJECT=1`);
+  3. **default**: last frame's displayed depth min-reduced to 480x272 and tested with last
+     frame's camera (scene is static; 1 frame of camera lag): 454 meshlets + 12 objects
+     culled for ~1.0 ms; vs no occlusion 66 dB PSNR (no visible popping).
+  Honest result: binned triangles −14%, frame time unchanged within noise. This view
+  looks down over the field, only ~9% of meshlets are hidden, and the remaining cost is
+  per-pixel shading, which occlusion does not reduce. `--no-occlusion`.
 
 ## Phase B optimisation rounds
 | round | change | baseline ms before → after | gain | fast ms before → after | gain |

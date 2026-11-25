@@ -20,6 +20,8 @@ struct Options {
   bool bloom = true;
   bool taa = true;  // temporal anti-aliasing (not combined with --checker)
   bool meshlets = true;  // per-meshlet frustum + normal-cone culling
+  bool occlusion = true;  // hierarchical-Z occlusion culling (needs meshlets for per-cluster tests)
+  bool occlusionPrepass = false;  // occluders rasterized each frame instead of last frame's depth
   float exposure = 1.6f;
   int outW = 1920, outH = 1080;
   std::string name() const;
@@ -35,6 +37,7 @@ Vec3 sunDirection();
 float lodPixelScale(const Camera& c);
 
 class ShadowMaps;
+class OcclusionCuller;
 
 // Renders frames for one combination of tricks; owns all buffers and history.
 class Engine {
@@ -56,6 +59,7 @@ class Engine {
   Options o_;
   Rasterizer rast_;
   std::unique_ptr<ShadowMaps> shadows_;
+  std::unique_ptr<OcclusionCuller> occlusion_;
   Reprojector reproj_;
   Bloom bloom_;
   int W_, H_;
@@ -70,6 +74,9 @@ class Engine {
   int hist_ = 0;
   size_t submitted_ = 0;
   CullStats cullStats_;
+  const float* occlusionDepth_ = nullptr;
+  int occlusionW_ = 0, occlusionH_ = 0;
+  bool occlusionReady_ = false;
   Camera prevCam_;
 };
 

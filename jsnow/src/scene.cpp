@@ -1,5 +1,7 @@
 #include "scene.hpp"
 
+#include "occlusion.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <random>
@@ -276,6 +278,7 @@ Scene buildScene(ThreadPool& pool, SceneKind kind, int texSize, int pointLights)
         const float mx = x0 + cs / 2, mz = z0 + cs / 2;
         o.center = {mx, terrainHeight(mx, mz), mz};
         o.radius = cs * 0.75f + 8.0f;  // half diagonal + height variation
+        o.occluder = true;
         o.lodCount = 3;
         for (int l = 0; l < 3; ++l) {
           o.lod[l] = addTerrainPatch(m, x0, z0, cs, cs, Q >> l, Q >> l, true);
@@ -475,7 +478,7 @@ Scene buildScene(ThreadPool& pool, SceneKind kind, int texSize, int pointLights)
 
 CullStats buildDrawList(const Scene& s, const Mat4& M, Vec3 eye, float pxPerUnit, bool cullNear, int lodBias,
                         std::vector<DrawItem>& out, std::vector<DrawItem>* transparentOut, const Vec3* orthoDir,
-                        bool clusterCull) {
+                        bool clusterCull, const OcclusionCuller* occlusion, bool occludersOnly) {
   out.clear();
   if (transparentOut) transparentOut->clear();
   // Clip-space half-spaces as world planes (Gribb-Hartmann): row3 +- row0/1.
@@ -508,8 +511,10 @@ CullStats buildDrawList(const Scene& s, const Mat4& M, Vec3 eye, float pxPerUnit
   CullStats st;
   for (const Object& o : s.objects) {
     if (o.transparent && !transparentOut) continue;
+    if (occludersOnly && !o.occluder) continue;
     const int vis = classify(o.center, o.radius);
     if (vis < 0) continue;
+    if (occlusion && !occlusion->visible(o.center, o.radius)) { ++st.objectsOccluded; continue; }
     const Vec3 dv = o.center - eye;
     const float dist = std::sqrt(dot(dv, dv));
     const float d = std::max(dist - o.radius, 1e-3f);  // nearest point of the bounds
@@ -550,6 +555,7 @@ CullStats buildDrawList(const Scene& s, const Mat4& M, Vec3 eye, float pxPerUnit
         }
       }
     keep:
+      if (occlusion && !occlusion->visible(c.center, c.radius)) { ++st.clustersOccluded; continue; }
       DrawItem it;
       it.r.firstIndex = c.firstIndex;
       it.r.indexCount = c.indexCount;

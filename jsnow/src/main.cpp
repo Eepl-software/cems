@@ -28,7 +28,7 @@ double mse(const uint32_t* a, const uint32_t* b, size_t n) {
 
 struct Result {
   std::string name;
-  double avgMs = 0, fps = 0, p99Ms = 0, psnrDb = 0, binned = 0, submitted = 0, clusters = 0, backface = 0, occluded = 0;
+  double avgMs = 0, fps = 0, p99Ms = 0, psnrDb = 0, binned = 0, submitted = 0, clusters = 0, backface = 0, occluded = 0, objOccluded = 0;
   StageTimes stages;
   int frames = 0;
 };
@@ -56,6 +56,7 @@ Result runConfig(ThreadPool& pool, const Scene& scene, const Options& o, int fra
     r.clusters += double(e.cullStats().clustersTested) / frames;
     r.backface += double(e.cullStats().clustersBackface) / frames;
     r.occluded += double(e.cullStats().clustersOccluded) / frames;
+    r.objOccluded += double(e.cullStats().objectsOccluded) / frames;
     if (f == pngFrame && !pngPath.empty()) {
       if (writePNG(pngPath, o.outW, o.outH, img)) std::printf("  saved frame %d -> %s\n", f, pngPath.c_str());
       else std::printf("  failed to write %s\n", pngPath.c_str());
@@ -72,7 +73,7 @@ Result runConfig(ThreadPool& pool, const Scene& scene, const Options& o, int fra
   if (quality) {
     // Untimed second pass: compare every 5th frame to the full-quality renderer.
     Options ref;
-    ref.outW = o.outW; ref.outH = o.outH; ref.shadows = o.shadows; ref.pointLights = o.pointLights; ref.transparency = o.transparency; ref.bloom = o.bloom; ref.taa = o.taa; ref.meshlets = o.meshlets;
+    ref.outW = o.outW; ref.outH = o.outH; ref.shadows = o.shadows; ref.pointLights = o.pointLights; ref.transparency = o.transparency; ref.bloom = o.bloom; ref.taa = o.taa; ref.meshlets = o.meshlets; ref.occlusion = o.occlusion; ref.occlusionPrepass = o.occlusionPrepass;
     ref.exposure = o.exposure;
     Engine test(pool, scene, o), reference(pool, scene, ref);
     StageTimes dummy;
@@ -96,8 +97,9 @@ void printResult(const Result& r) {
   const double n = r.frames;
   std::printf("%-20s %7.1f FPS %7.2f ms/frame (p99 %6.2f)", r.name.c_str(), r.fps, r.avgMs, r.p99Ms);
   if (r.psnrDb > 0) std::printf("  PSNR %5.1f dB", r.psnrDb);
-  std::printf("  [%.0f tris submitted, %.0f binned; meshlets: %.0f tested, %.0f back-facing, %.0f occluded]\n",
-              r.submitted, r.binned, r.clusters, r.backface, r.occluded);
+  std::printf("  [%.0f tris submitted, %.0f binned; meshlets: %.0f tested, %.0f back-facing, %.0f occluded; "
+              "%.0f objects occluded]\n",
+              r.submitted, r.binned, r.clusters, r.backface, r.occluded, r.objOccluded);
   std::printf("    ms/frame: cull %.2f | shadow %.2f | vertex %.2f | setup+bin %.2f | raster+shade %.2f | "
               "post %.2f | reproject %.2f | compose %.2f | upscale %.2f\n",
               r.stages.cull / n, r.stages.shadow / n, r.stages.vertex / n, r.stages.setup / n,
@@ -119,6 +121,8 @@ void usage() {
       "  --no-bloom      disable HDR bloom\n"
       "  --no-taa        disable temporal anti-aliasing\n"
       "  --no-meshlets   disable per-meshlet (cluster) frustum + back-face culling\n"
+      "  --no-occlusion  disable hierarchical-Z occlusion culling\n"
+      "  --occlusion-prepass  HiZ from an occluder pre-pass instead of last frame's depth\n"
       "  --lights N      number of point lights (default 128, max 255)\n"
       "  --exposure E    tone-mapping exposure (default 1.6)\n"
       "  --scene S       huge (default: 5M tris), large (1M tris) or small (100k, session 1)\n"
@@ -158,6 +162,8 @@ int main(int argc, char** argv) {
     else if (a == "--no-bloom") o.bloom = false;
     else if (a == "--no-taa") o.taa = false;
     else if (a == "--no-meshlets") o.meshlets = false;
+    else if (a == "--no-occlusion") o.occlusion = false;
+    else if (a == "--occlusion-prepass") o.occlusionPrepass = true;
     else if (a == "--exposure") o.exposure = float(std::atof(next().c_str()));
     else if (a == "--bench") bench = true;
     else if (a == "--bench-fast") bench = benchFast = true;
