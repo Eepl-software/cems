@@ -169,7 +169,7 @@ int main(int argc, char** argv) {
   std::printf("JSNOW: scene %s: %zu tris full detail (%zu in all LODs), %zu vertices, %zu textures %dx%d, "
               "built in %.0f ms\n       %dx%d, %d threads, %s, %d frames, shadows %s\n",
               scene.description.c_str(), scene.fullDetailTriangles, scene.mesh.triangleCount(),
-              scene.mesh.vertexCount(), scene.textures.size(), texSize, texSize, buildMs, o.outW, o.outH,
+              scene.mesh.vertexCount(), size_t(scene.textures.layers), texSize, texSize, buildMs, o.outW, o.outH,
               threads, simd::backendName(), frames, o.shadows ? "on" : "off");
 
   if (!bench) {

@@ -29,6 +29,8 @@ Tools installed in the session (needed again in a fresh container):
 | A4 1M tris (shadow 5.4) | fast | 71.7 | 13.94 | 33.9 | 0.31 | 1.26 | 6.12 | 0.50 | – | 0.39 | raster 6.1, shadow 5.4 |
 | A5 NEON (x86 numbers; shadow 10.9) | baseline | 22.4 | 44.57 | ref | 0.70 | 2.75 | 30.18 | – | – | – | raster |
 | A5 NEON (x86 numbers; shadow 5.2) | fast | 74.7 | 13.38 | 33.9 | 0.31 | 1.22 | 5.85 | 0.44 | – | 0.37 | raster ≈ shadow |
+| B1 visibility buffer (shadow 11.2) | baseline | 34.4 | 29.09 | ref | 0.67 | 2.91 | 14.34 | – | – | – | raster 14.3, shadow 11.2 |
+| B1 visibility buffer (shadow 5.4) | fast | 92.4 | 10.82 | 33.9 | 0.33 | 1.36 | 2.90 | 0.47 | – | 0.40 | shadow passes 5.4 (half the frame) |
 
 ## Decisions log
 - A1: `--fast` = half resolution + reuse (best trade-off found in session 1).
@@ -60,6 +62,13 @@ Tools installed in the session (needed again in a fresh container):
   (`-DJSNOW_FORCE_SCALAR`) matches too. **Not performance-tested on real Apple Silicon**
   (qemu timings are meaningless); not compile-tested with Apple clang / macOS SDK.
 
+## Phase B optimisation rounds
+| round | change | baseline ms before → after | gain | fast ms before → after | gain |
+|---|---|---|---:|---|---:|
+| B1 | per-tile visibility buffer: raster writes depth + triangle id only; each tile shaded once per pixel, attributes resolved per distinct triangle per 8-px group, per-lane materials (texture array) | 44.57 → 29.09 | 35% | 13.38 → 10.82 | 19% |
+
+B1 output is bit-identical to the forward renderer (same per-pixel math).
+
 ## Done
 - Session 1: tiled AVX2 rasterizer, half/checker/reuse tricks, benchmark harness.
 - A1: `--fast`.
@@ -69,4 +78,4 @@ Tools installed in the session (needed again in a fresh container):
 - A5: NEON path (cross-compiled, functionally verified under qemu).
 
 ## Next
-- Phase B: first target = forward shading of tiny triangles (move to deferred / visibility buffer).
+- Phase B round 2: shadow passes (11 ms baseline, 5.4 ms fast).

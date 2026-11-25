@@ -19,14 +19,24 @@ struct Texture {
 // gen(x, y) returns an RGBA8 texel for level 0.
 Texture makeTexture(ThreadPool& pool, int size, const std::function<uint32_t(int, int)>& gen);
 
+// All material textures in one allocation so a group of 8 pixels can sample
+// a different texture per lane. Every layer has the same size and mip layout.
+struct TextureArray {
+  int size = 0, log2size = 0, levels = 0, layers = 0;
+  int32_t layerStride = 0;
+  alignas(32) int32_t offset[16] = {};  // mip level offsets inside a layer
+  std::vector<uint32_t> texels;
+};
+TextureArray makeTextureArray(std::vector<Texture>& textures);  // frees the inputs
+
 // Bilinear filtering inside the nearest mip level (GL_LINEAR_MIPMAP_NEAREST),
-// repeat wrapping, 8 lanes. u, v in texture repeats; lod = log2(level-0 texels
-// per pixel). Returns channels in 0..255.
-inline void sampleBilinear(const Texture& t, simd::vf u, simd::vf v, simd::vf lod, simd::vf& r,
-                           simd::vf& g, simd::vf& b) {
+// repeat wrapping, 8 lanes with a per-lane layer. u, v in texture repeats;
+// lod = log2(level-0 texels per pixel). Returns channels in 0..255.
+inline void sampleBilinear(const TextureArray& t, simd::vi layer, simd::vf u, simd::vf v, simd::vf lod,
+                           simd::vf& r, simd::vf& g, simd::vf& b) {
   using namespace simd;
   const vi L = mini(maxi(trunc_i(lod + set1(0.5f)), set1i(0)), set1i(t.levels - 1));
-  const vi shift = set1i(t.log2size) - L;   // log2 of the level size
+  const vi shift = set1i(t.log2size) - L;  // log2 of the level size
   const vi sizeL = shlv(set1i(1), shift);
   const vi maskL = sizeL - set1i(1);
   const vf fs = to_f(sizeL);
@@ -35,7 +45,7 @@ inline void sampleBilinear(const Texture& t, simd::vf u, simd::vf v, simd::vf lo
   const vf ax = x - fx, ay = y - fy;
   const vi ix0 = trunc_i(fx) & maskL, iy0 = trunc_i(fy) & maskL;
   const vi ix1 = (ix0 + set1i(1)) & maskL, iy1 = (iy0 + set1i(1)) & maskL;
-  const vi base = gather(t.offset, L);
+  const vi base = gather(t.offset, L) + layer * set1i(t.layerStride);
   const vi row0 = base + shlv(iy0, shift), row1 = base + shlv(iy1, shift);
   const uint32_t* tx = t.texels.data();
   const vi t00 = gather(tx, row0 + ix0), t10 = gather(tx, row0 + ix1);

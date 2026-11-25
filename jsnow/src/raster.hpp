@@ -70,6 +70,7 @@ struct alignas(16) TriHeader {
 };
 // Perspective-correct attribute planes: q = 1/w and attr*q.
 struct TriAttr {
+  float x0, y0;  // plane origin (copy of the header's, so shading never touches headers)
   float pq[3];
   float pa[kAttrs][3];
   uint32_t material;
@@ -108,8 +109,12 @@ class Rasterizer {
   struct TileBuf {
     alignas(64) float depth[kTile * kTile];
     alignas(64) uint32_t color[kTile * kTile];
+    alignas(64) uint32_t id[kTile * kTile];  // visibility buffer: chunk << 24 | triangle
   };
   std::vector<TileBuf> tileBufs_;
+  // Material table in SoA form for per-lane gathers while shading.
+  std::vector<int32_t> matLayer_;
+  std::vector<float> matR_, matG_, matB_, matSpec_;
   size_t binned_ = 0;
 };
 

@@ -20,17 +20,13 @@ constexpr int kVertexBlock = 2048;
 
 inline float snap(float v) { return std::floor(v * kSnap + 0.5f) * (1.0f / kSnap); }
 
-struct MatInfo {
-  const Texture* tex;
-  float tint[3];
-  float spec;
-};
-
 struct ShadeCtx {
   float L[3];
   float cam[3];
   const ShadowLookup* shadow;
-  const MatInfo* mats;
+  const TextureArray* tex;
+  const int32_t* matLayer;
+  const float *matR, *matG, *matB, *matSpec;
 };
 
 }  // namespace
@@ -109,6 +105,7 @@ void Rasterizer::setupTri(Chunk& ch, const SV& va, const SV& vb, const SV& vc, u
   plane(t.pd, v0.d, v1.d, v2.d);
   if (shaded) {
     TriAttr& a = ch.attr.emplace_back();
+    a.x0 = v0.x; a.y0 = v0.y;
     plane(a.pq, v0.q, v1.q, v2.q);
     for (int k = 0; k < kAttrs; ++k) plane(a.pa[k], v0.a[k] * v0.q, v1.a[k] * v1.q, v2.a[k] * v2.q);
     a.material = mat;
@@ -231,54 +228,74 @@ namespace {
 
 inline vf plane8(const float* p, vf x, vf y) { return fma(set1(p[1]), x, fma(set1(p[2]), y, set1(p[0]))); }
 
-// Forward shading of 8 pixels: texture (mip + bilinear), sun (Lambert +
-// Blinn-Phong, shadowed), hemisphere ambient.
-inline vi shade8(const TriAttr& t, vf x, vf y, const ShadeCtx& s) {
-  const MatInfo& mi = s.mats[t.material];
-  const vf q = plane8(t.pq, x, y);
-  const vf w = rcp(q);
-  const vf u = plane8(t.pa[0], x, y) * w, v = plane8(t.pa[1], x, y) * w;
-  // Screen-space UV derivatives of u = U/Q: du/dx = (dU/dx - u dQ/dx) / Q.
-  const vf qx = set1(t.pq[1]), qy = set1(t.pq[2]);
-  const vf dudx = fnma(u, qx, set1(t.pa[0][1])) * w, dvdx = fnma(v, qx, set1(t.pa[1][1])) * w;
-  const vf dudy = fnma(u, qy, set1(t.pa[0][2])) * w, dvdy = fnma(v, qy, set1(t.pa[1][2])) * w;
-  const float ts = float(mi.tex->size);
-  const vf rho2 = max(fma(dudx, dudx, dvdx * dvdx), fma(dudy, dudy, dvdy * dvdy)) * set1(ts * ts);
-  const vf lod = set1(0.5f) * log2_fast(max(rho2, set1(1e-12f)));
+// Deferred shading of 8 pixels of a tile from its visibility buffer: the
+// attributes of every distinct triangle in the group are evaluated once for
+// all lanes and merged per lane; texture, shadow and lighting then run once
+// per pixel with full lane utilisation.
+template <class AttrOf>
+inline vi shadeGroup(vi ids, vf x, vf y, const ShadeCtx& s, const AttrOf& attrOf) {
+  alignas(32) int32_t idl[8];
+  lanes(ids, idl);
+  const vm sky = cmpeq(ids, set1i(-1));
+  int remaining = ~bits(sky) & 0xFF;
+  vf W = set1(1.0f), U = zerof(), V = zerof(), LOD = zerof();
+  vf NX = zerof(), NY = set1(1.0f), NZ = zerof(), WX = zerof(), WY = zerof(), WZ = zerof();
+  vi MAT = set1i(0);
+  const float ts2 = float(s.tex->size) * float(s.tex->size);
+  while (remaining) {
+    const int k = __builtin_ctz(unsigned(remaining));
+    const vm m = cmpeq(ids, set1i(idl[k]));
+    remaining &= ~bits(m);
+    const TriAttr& t = attrOf(uint32_t(idl[k]));
+    const vf fx = x - set1(t.x0), fy = y - set1(t.y0);
+    const vf q = plane8(t.pq, fx, fy);
+    const vf w = rcp(q);
+    const vf u = plane8(t.pa[0], fx, fy) * w, v = plane8(t.pa[1], fx, fy) * w;
+    // Screen-space UV derivatives of u = U/Q: du/dx = (dU/dx - u dQ/dx) / Q.
+    const vf qx = set1(t.pq[1]), qy = set1(t.pq[2]);
+    const vf dudx = fnma(u, qx, set1(t.pa[0][1])) * w, dvdx = fnma(v, qx, set1(t.pa[1][1])) * w;
+    const vf dudy = fnma(u, qy, set1(t.pa[0][2])) * w, dvdy = fnma(v, qy, set1(t.pa[1][2])) * w;
+    const vf rho2 = max(fma(dudx, dudx, dvdx * dvdx), fma(dudy, dudy, dvdy * dvdy)) * set1(ts2);
+    W = select(m, w, W); U = select(m, u, U); V = select(m, v, V);
+    LOD = select(m, set1(0.5f) * log2_fast(max(rho2, set1(1e-12f))), LOD);
+    NX = select(m, plane8(t.pa[2], fx, fy), NX);
+    NY = select(m, plane8(t.pa[3], fx, fy), NY);
+    NZ = select(m, plane8(t.pa[4], fx, fy), NZ);
+    WX = select(m, plane8(t.pa[5], fx, fy) * w, WX);
+    WY = select(m, plane8(t.pa[6], fx, fy) * w, WY);
+    WZ = select(m, plane8(t.pa[7], fx, fy) * w, WZ);
+    MAT = selecti(m, set1i(int32_t(t.material)), MAT);
+  }
   vf r, g, b;
-  sampleBilinear(*mi.tex, u, v, lod, r, g, b);
-
-  vf nx = plane8(t.pa[2], x, y), ny = plane8(t.pa[3], x, y), nz = plane8(t.pa[4], x, y);
-  const vf rn = rsqrt_fast(fma(nx, nx, fma(ny, ny, nz * nz)));
-  nx = nx * rn; ny = ny * rn; nz = nz * rn;
-  const vf wx = plane8(t.pa[5], x, y) * w, wy = plane8(t.pa[6], x, y) * w, wz = plane8(t.pa[7], x, y) * w;
+  sampleBilinear(*s.tex, gather(s.matLayer, MAT), U, V, LOD, r, g, b);
+  const vf rn = rsqrt_fast(fma(NX, NX, fma(NY, NY, NZ * NZ)));
+  const vf nx = NX * rn, ny = NY * rn, nz = NZ * rn;
   const vf Lx = set1(s.L[0]), Ly = set1(s.L[1]), Lz = set1(s.L[2]);
   const vf ndl = max(fma(nx, Lx, fma(ny, Ly, nz * Lz)), zerof());
   vf lit = set1(1.0f);
-  if (s.shadow) lit = s.shadow->sample(wx, wy, wz, w, ndl);
-  vf vx = set1(s.cam[0]) - wx, vy = set1(s.cam[1]) - wy, vz = set1(s.cam[2]) - wz;
+  if (s.shadow) lit = s.shadow->sample(WX, WY, WZ, W, ndl);
+  const vf vx = set1(s.cam[0]) - WX, vy = set1(s.cam[1]) - WY, vz = set1(s.cam[2]) - WZ;
   const vf rv = rsqrt_fast(fma(vx, vx, fma(vy, vy, vz * vz)));
-  vf hx = fma(vx, rv, Lx), hy = fma(vy, rv, Ly), hz = fma(vz, rv, Lz);
+  const vf hx = fma(vx, rv, Lx), hy = fma(vy, rv, Ly), hz = fma(vz, rv, Lz);
   const vf rh = rsqrt_fast(fma(hx, hx, fma(hy, hy, hz * hz)));
   vf ndh = max(fma(nx, hx, fma(ny, hy, nz * hz)) * rh, zerof());
   ndh = ndh * ndh; ndh = ndh * ndh; ndh = ndh * ndh; ndh = ndh * ndh; ndh = ndh * ndh;  // ^32
-  const vf sp = ndh * lit * set1(mi.spec * 255.0f);
+  const vf sp = ndh * lit * gatherf(s.matSpec, MAT) * set1(255.0f);
   const vf direct = ndl * lit;
   const vf amb = fma(ny, set1(0.08f), set1(0.16f));
+  const vf tr = gatherf(s.matR, MAT), tg = gatherf(s.matG, MAT), tb = gatherf(s.matB, MAT);
   const vf k255 = set1(255.0f);
-  const vf lr = fma(direct, set1(1.00f * mi.tint[0]), amb * set1(mi.tint[0]));
-  const vf lg = fma(direct, set1(0.94f * mi.tint[1]), amb * set1(mi.tint[1]));
-  const vf lb = fma(direct, set1(0.82f * mi.tint[2]), amb * set1(mi.tint[2]));
-  const vi ri = trunc_i(min(fma(r, lr, sp), k255));
-  const vi gi = trunc_i(min(fma(g, lg, sp), k255));
-  const vi bi = trunc_i(min(fma(b, lb, sp), k255));
-  return ri | shl<8>(gi) | shl<16>(bi) | set1i(int32_t(0xFF000000u));
+  const vi ri = trunc_i(min(fma(r * tr, fma(direct, set1(1.00f), amb), sp), k255));
+  const vi gi = trunc_i(min(fma(g * tg, fma(direct, set1(0.94f), amb), sp), k255));
+  const vi bi = trunc_i(min(fma(b * tb, fma(direct, set1(0.82f), amb), sp), k255));
+  const vi col = ri | shl<8>(gi) | shl<16>(bi) | set1i(int32_t(0xFF000000u));
+  return selecti(sky, set1i(int32_t(kSkyColor)), col);
 }
 
 // Rasterizes one triangle into a 64x64 tile, 8 pixels per step.
+// Shaded passes only record the winning triangle id (visibility buffer).
 template <bool kShaded>
-void drawTri(const TriHeader& t, const TriAttr* at, float* depth, uint32_t* color, int tileX, int tileY,
-             const ShadeCtx& s) {
+void drawTri(const TriHeader& t, uint32_t triId, float* depth, uint32_t* ids, int tileX, int tileY) {
   const int x0 = std::max(t.minx, tileX), x1 = std::min(t.maxx, tileX + kTile - 1);
   const int y0 = std::max(t.miny, tileY), y1 = std::min(t.maxy, tileY + kTile - 1);
   if (x0 > x1 || y0 > y1) return;
@@ -295,12 +312,10 @@ void drawTri(const TriHeader& t, const TriAttr* at, float* depth, uint32_t* colo
   }
   vf zr = fma(set1(t.pd[1]), X, set1(t.pd[0] + t.pd[2] * fy));
   const vf zstep = set1(8.0f * t.pd[1]), zy = set1(t.pd[2]);
-  const vf eight = set1(8.0f);
-  float py = fy;
-  for (int y = y0; y <= y1; ++y, py += 1.0f) {
-    vf e0 = er[0], e1 = er[1], e2 = er[2], z = zr, xv = X;
+  for (int y = y0; y <= y1; ++y) {
+    vf e0 = er[0], e1 = er[1], e2 = er[2], z = zr;
     float* drow = depth + (y - tileY) * kTile + (cxs - tileX);
-    uint32_t* crow = color + (y - tileY) * kTile + (cxs - tileX);
+    uint32_t* irow = ids + (y - tileY) * kTile + (cxs - tileX);
     for (int c = 0; c < nch; ++c) {
       // Sign bit set in any edge -> outside.
       const vm outside = signmask(as_f(as_i(e0) | as_i(e1) | as_i(e2)));
@@ -309,16 +324,11 @@ void drawTri(const TriHeader& t, const TriAttr* at, float* depth, uint32_t* colo
         const vm m = andnot(outside, z > d);
         if (bits(m)) {
           store(drow + 8 * c, select(m, z, d));
-          if constexpr (kShaded) {
-            const vi col = shade8(*at, xv, set1(py), s);
-            const vi old = loadi(crow + 8 * c);
-            storei(crow + 8 * c, selecti(m, col, old));
-          }
+          if constexpr (kShaded) storei(irow + 8 * c, selecti(m, set1i(int32_t(triId)), loadi(irow + 8 * c)));
         }
       }
       e0 = e0 + estep[0]; e1 = e1 + estep[1]; e2 = e2 + estep[2];
       z = z + zstep;
-      xv = xv + eight;
     }
     er[0] = er[0] + ey[0]; er[1] = er[1] + ey[1]; er[2] = er[2] + ey[2];
     zr = zr + zy;
@@ -331,23 +341,32 @@ void Rasterizer::rasterTile(int tile, int tid, const Target& tg, const PassParam
   TileBuf& tb = tileBufs_[tid];
   const bool shaded = pp.mode == PassMode::Shaded;
   std::fill(std::begin(tb.depth), std::end(tb.depth), 0.0f);
-  if (shaded) std::fill(std::begin(tb.color), std::end(tb.color), kSkyColor);
+  if (shaded) std::fill(std::begin(tb.id), std::end(tb.id), 0xFFFFFFFFu);
   const int tileX = (tile % tilesX_) * kTile, tileY = (tile / tilesX_) * kTile;
-
-  static thread_local std::vector<MatInfo> mats;
-  if (shaded && mats.size() != scene_.materials.size()) mats.resize(scene_.materials.size());
-  if (shaded)
-    for (size_t i = 0; i < mats.size(); ++i) {
-      const Material& m = scene_.materials[i];
-      mats[i] = {&scene_.textures[m.texture], {m.tint[0], m.tint[1], m.tint[2]}, m.specular};
-    }
-  ShadeCtx s{{pp.sunDir.x, pp.sunDir.y, pp.sunDir.z}, {pp.camPos.x, pp.camPos.y, pp.camPos.z}, pp.shadow, mats.data()};
-  for (const Chunk& ch : chunks_)
+  for (size_t c = 0; c < chunks_.size(); ++c) {
+    const Chunk& ch = chunks_[c];
     for (uint32_t id : ch.bins[tile]) {
-      if (shaded) drawTri<true>(ch.hdr[id], &ch.attr[id], tb.depth, tb.color, tileX, tileY, s);
-      else drawTri<false>(ch.hdr[id], nullptr, tb.depth, tb.color, tileX, tileY, s);
+      if (shaded) drawTri<true>(ch.hdr[id], uint32_t(c << 24) | id, tb.depth, tb.id, tileX, tileY);
+      else drawTri<false>(ch.hdr[id], 0, tb.depth, nullptr, tileX, tileY);
     }
+  }
   const int w = std::min(kTile, tg.w - tileX), h = std::min(kTile, tg.h - tileY);
+  if (shaded) {
+    const ShadeCtx s{{pp.sunDir.x, pp.sunDir.y, pp.sunDir.z}, {pp.camPos.x, pp.camPos.y, pp.camPos.z}, pp.shadow,
+                     &scene_.textures, matLayer_.data(), matR_.data(), matG_.data(), matB_.data(), matSpec_.data()};
+    auto attrOf = [&](uint32_t id) -> const TriAttr& { return chunks_[id >> 24].attr[id & 0xFFFFFF]; };
+    for (int y = 0; y < h; ++y) {
+      const vf py = set1(float(tileY + y) + 0.5f);
+      for (int gx = 0; gx < w; gx += 8) {
+        const int o = y * kTile + gx;
+        const vi ids = loadi(tb.id + o);
+        vi col;
+        if (bits(cmpeq(ids, set1i(-1))) == 0xFF) col = set1i(int32_t(kSkyColor));
+        else col = shadeGroup(ids, set1(float(tileX + gx) + 0.5f) + iotaf(), py, s, attrOf);
+        storei(tb.color + o, col);
+      }
+    }
+  }
   for (int y = 0; y < h; ++y) {
     if (tg.color)
       std::memcpy(tg.color + size_t(tileY + y) * tg.w + tileX, tb.color + y * kTile, w * sizeof(uint32_t));
@@ -367,6 +386,13 @@ void Rasterizer::render(const PassParams& pp, const std::vector<DrawItem>& draws
     tilesX_ = (tg.w + kTile - 1) / kTile;
     tilesY_ = (tg.h + kTile - 1) / kTile;
     for (auto& c : chunks_) c.bins.assign(tilesX_ * tilesY_, {});
+  }
+  if (matLayer_.size() != scene_.materials.size()) {
+    for (const Material& m : scene_.materials) {
+      matLayer_.push_back(m.texture);
+      matR_.push_back(m.tint[0]); matG_.push_back(m.tint[1]); matB_.push_back(m.tint[2]);
+      matSpec_.push_back(m.specular);
+    }
   }
   vblocks_.clear();
   triPrefix_.assign(1, 0);

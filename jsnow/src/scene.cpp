@@ -183,26 +183,27 @@ Scene buildScene(ThreadPool& pool, SceneKind kind, int texSize) {
   const float N = float(texSize);
 
   // Textures: 0 grass, 1 rock, 2 snow, 3 painted tiles (tinted per sphere).
-  s.textures.push_back(makeTexture(pool, texSize, [&](int x, int y) {
+  std::vector<Texture> tex;
+  tex.push_back(makeTexture(pool, texSize, [&](int x, int y) {
     const float u = x / N, v = y / N;
     const float f = fbm(u, v, 8, 11, 5);
     const float blades = hashf(x, y / 3, 5) * 0.25f;
     const float k = 0.65f + 0.55f * f + blades;
     return rgba(0.22f * k, 0.50f * k, 0.14f * k);
   }));
-  s.textures.push_back(makeTexture(pool, texSize, [&](int x, int y) {
+  tex.push_back(makeTexture(pool, texSize, [&](int x, int y) {
     const float u = x / N, v = y / N;
     const float f = fbm(u, v, 6, 21, 6);
     const float cracks = std::fabs(fbm(u, v, 4, 31, 4) - 0.5f) < 0.02f ? 0.55f : 1.0f;
     const float k = (0.6f + 0.7f * f) * cracks;
     return rgba(0.46f * k, 0.43f * k, 0.39f * k);
   }));
-  s.textures.push_back(makeTexture(pool, texSize, [&](int x, int y) {
+  tex.push_back(makeTexture(pool, texSize, [&](int x, int y) {
     const float f = fbm(x / N, y / N, 8, 41, 4);
     const float k = 0.88f + 0.14f * f;
     return rgba(0.93f * k, 0.95f * k, 1.0f * k);
   }));
-  s.textures.push_back(makeTexture(pool, texSize, [&](int x, int y) {
+  tex.push_back(makeTexture(pool, texSize, [&](int x, int y) {
     const float u = x / N, v = y / N;
     const int tx = int(u * 16), ty = int(v * 16);
     const float fu = u * 16 - tx, fv = v * 16 - ty;
@@ -211,6 +212,7 @@ Scene buildScene(ThreadPool& pool, SceneKind kind, int texSize) {
     const float k = mortar ? 0.35f : (0.75f + 0.25f * hashf(tx, ty, 61)) * (0.85f + 0.3f * f);
     return rgba(k, k, k);
   }));
+  s.textures = makeTextureArray(tex);
   s.materials.resize(3);
   s.materials[0].texture = 0; s.materials[0].specular = 0.08f;
   s.materials[1].texture = 1; s.materials[1].specular = 0.15f;

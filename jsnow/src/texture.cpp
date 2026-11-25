@@ -40,4 +40,21 @@ Texture makeTexture(ThreadPool& pool, int size, const std::function<uint32_t(int
   return t;
 }
 
+TextureArray makeTextureArray(std::vector<Texture>& textures) {
+  TextureArray a;
+  if (textures.empty()) return a;
+  const Texture& t0 = textures[0];
+  a.size = t0.size; a.log2size = t0.log2size; a.levels = t0.levels;
+  a.layers = int(textures.size());
+  a.layerStride = int32_t(t0.texels.size());
+  for (int l = 0; l < 16; ++l) a.offset[l] = t0.offset[l];
+  a.texels.resize(size_t(a.layerStride) * a.layers);
+  for (int i = 0; i < a.layers; ++i) {
+    std::copy(textures[i].texels.begin(), textures[i].texels.end(), a.texels.begin() + size_t(i) * a.layerStride);
+    std::vector<uint32_t>().swap(textures[i].texels);
+  }
+  textures.clear();
+  return a;
+}
+
 }  // namespace jsnow

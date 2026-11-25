@@ -49,7 +49,7 @@ struct Scene {
   Mesh mesh;
   std::vector<Object> objects;
   std::vector<Material> materials;
-  std::vector<Texture> textures;
+  TextureArray textures;  // one layer per material texture
   size_t fullDetailTriangles = 0;  // sum of LOD0 triangle counts
   std::string description;
 };

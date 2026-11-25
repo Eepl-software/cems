@@ -77,6 +77,7 @@ template <int n> inline vi shr(vi a) { return {_mm256_srli_epi32(a.v, n)}; }
 inline vi shlv(vi a, vi n) { return {_mm256_sllv_epi32(a.v, n.v)}; }
 inline vi shrv(vi a, vi n) { return {_mm256_srlv_epi32(a.v, n.v)}; }
 inline vi mini(vi a, vi b) { return {_mm256_min_epi32(a.v, b.v)}; }
+inline vm cmpeq(vi a, vi b) { return {_mm256_castsi256_ps(_mm256_cmpeq_epi32(a.v, b.v))}; }
 inline vi maxi(vi a, vi b) { return {_mm256_max_epi32(a.v, b.v)}; }
 inline vi trunc_i(vf a) { return {_mm256_cvttps_epi32(a.v)}; }
 inline vf to_f(vi a) { return {_mm256_cvtepi32_ps(a.v)}; }
@@ -185,6 +186,7 @@ inline vi shrv(vi x, vi n) {
           vreinterpretq_s32_u32(vshlq_u32(vreinterpretq_u32_s32(x.b), vnegq_s32(n.b)))};
 }
 inline vi mini(vi x, vi y) { return JSNOW_F2(vminq_s32); }
+inline vm cmpeq(vi x, vi y) { return JSNOW_F2(vceqq_s32); }
 inline vi maxi(vi x, vi y) { return JSNOW_F2(vmaxq_s32); }
 inline vi trunc_i(vf x) { return {vcvtq_s32_f32(x.a), vcvtq_s32_f32(x.b)}; }
 inline vf to_f(vi x) { return {vcvtq_f32_s32(x.a), vcvtq_f32_s32(x.b)}; }
@@ -254,6 +256,7 @@ template <int n> inline vi shr(vi a) { JSNOW_MAP(vi, int32_t(uint32_t(a.l[i]) >>
 inline vi shlv(vi a, vi n) { JSNOW_MAP(vi, n.l[i] > 31 ? 0 : int32_t(uint32_t(a.l[i]) << n.l[i])); }
 inline vi shrv(vi a, vi n) { JSNOW_MAP(vi, n.l[i] > 31 ? 0 : int32_t(uint32_t(a.l[i]) >> n.l[i])); }
 inline vi mini(vi a, vi b) { JSNOW_MAP(vi, a.l[i] < b.l[i] ? a.l[i] : b.l[i]); }
+inline vm cmpeq(vi a, vi b) { JSNOW_MAP(vm, a.l[i] == b.l[i] ? ~0u : 0u); }
 inline vi maxi(vi a, vi b) { JSNOW_MAP(vi, a.l[i] > b.l[i] ? a.l[i] : b.l[i]); }
 inline vi trunc_i(vf a) {
   JSNOW_MAP(vi, (a.l[i] > -2147483648.0f && a.l[i] < 2147483648.0f) ? int32_t(a.l[i]) : INT32_MIN);
