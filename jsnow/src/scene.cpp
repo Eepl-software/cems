@@ -52,6 +52,16 @@ uint16_t terrainMaterial(Vec3 p, Vec3 n) {
   return (1.0f - n.y) > 0.25f ? 1 : 0;
 }
 
+// Visits an (rows x cols) grid in 8x8 blocks so that consecutive runs of 128
+// triangles (one meshlet) are spatially compact with a narrow normal cone.
+template <class F>
+void forBlocks(int rows, int cols, const F& f) {
+  for (int bi = 0; bi < rows; bi += 8)
+    for (int bj = 0; bj < cols; bj += 8)
+      for (int i = bi; i < std::min(rows, bi + 8); ++i)
+        for (int j = bj; j < std::min(cols, bj + 8); ++j) f(i, j);
+}
+
 struct RangeBuilder {
   Mesh& m;
   LodRange r;
@@ -77,13 +87,12 @@ LodRange addTerrainPatch(Mesh& m, float x0, float z0, float sx, float sz, int nx
       addVertex(m, {x, terrainHeight(x, z), z}, terrainNormal(x, z), x * kTexRepeat, z * kTexRepeat);
     }
   auto V = [&](int i, int j) { return base + uint32_t(j * (nx + 1) + i); };
-  for (int j = 0; j < nz; ++j)
-    for (int i = 0; i < nx; ++i) {
+  forBlocks(nz, nx, [&](int j, int i) {
       const float cx = x0 + sx * (i + 0.5f) / nx, cz = z0 + sz * (j + 0.5f) / nz;
       const uint16_t mat = terrainMaterial({cx, terrainHeight(cx, cz), cz}, terrainNormal(cx, cz));
       addTri(m, V(i, j), V(i, j + 1), V(i + 1, j), mat);
       addTri(m, V(i + 1, j), V(i, j + 1), V(i + 1, j + 1), mat);
-    }
+    });
   if (skirts) {
     auto edge = [&](int count, auto vertexAt, Vec3 outward) {
       std::vector<uint32_t> top, bottom;
@@ -131,11 +140,10 @@ LodRange addSphere(Mesh& m, Vec3 center, float r, int S, int L, uint16_t mat) {
     }
   }
   auto V = [&](int i, int j) { return first + uint32_t(i * (L + 1) + j); };
-  for (int i = 0; i < S; ++i)
-    for (int j = 0; j < L; ++j) {
+  forBlocks(S, L, [&](int i, int j) {
       if (i != 0) addTri(m, V(i, j), V(i + 1, j), V(i, j + 1), mat);
       if (i != S - 1) addTri(m, V(i, j + 1), V(i + 1, j), V(i + 1, j + 1), mat);
-    }
+    });
   return rb.done();
 }
 
@@ -151,11 +159,10 @@ LodRange addCylinder(Mesh& m, Vec3 base, float r, float height, int segs, int ri
       addVertex(m, base + Vec3{n.x * r, height * i / rings, n.z * r}, n, 4.0f * j / segs, height * i / rings * 0.25f);
     }
   auto V = [&](int i, int j) { return first + uint32_t(i * (segs + 1) + j); };
-  for (int i = 0; i < rings; ++i)
-    for (int j = 0; j < segs; ++j) {
+  forBlocks(rings, segs, [&](int i, int j) {
       addTri(m, V(i, j), V(i + 1, j), V(i, j + 1), mat);
       addTri(m, V(i, j + 1), V(i + 1, j), V(i + 1, j + 1), mat);
-    }
+    });
   for (int cap = 0; cap < 2; ++cap) {  // bottom (cap 0) and top (cap 1)
     const float y = cap ? height : 0.0f;
     const Vec3 n{0, cap ? 1.0f : -1.0f, 0};
@@ -419,13 +426,56 @@ Scene buildScene(ThreadPool& pool, SceneKind kind, int texSize, int pointLights)
     s.lights.push_back(l);
   }
   for (const Object& o : s.objects) s.fullDetailTriangles += o.lod[0].indexCount / 3;
+  // ---- meshlets: consecutive runs of <= 128 triangles of every object LOD ----
+  for (Object& o : s.objects)
+    for (int l = 0; l < o.lodCount; ++l) {
+      LodRange& r = o.lod[l];
+      r.firstCluster = uint32_t(s.clusters.size());
+      for (uint32_t t = 0; t < r.indexCount / 3; t += kClusterTris) {
+        Cluster c;
+        c.firstIndex = r.firstIndex + 3 * t;
+        c.indexCount = 3 * std::min<uint32_t>(kClusterTris, r.indexCount / 3 - t);
+        // Bounds: AABB centre + max distance.
+        Vec3 lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
+        for (uint32_t k = 0; k < c.indexCount; ++k) {
+          const Vec3 p = pos(m, m.idx[c.firstIndex + k]);
+          lo = {std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z)};
+          hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
+        }
+        c.center = (lo + hi) * 0.5f;
+        for (uint32_t k = 0; k < c.indexCount; ++k) {
+          const Vec3 d = pos(m, m.idx[c.firstIndex + k]) - c.center;
+          c.radius = std::max(c.radius, std::sqrt(dot(d, d)));
+        }
+        // Normal cone: axis = mean face normal, half-angle = max deviation.
+        Vec3 axis{0, 0, 0};
+        std::vector<Vec3> fn;
+        for (uint32_t k = 0; k < c.indexCount; k += 3) {
+          const Vec3 a = pos(m, m.idx[c.firstIndex + k]), b = pos(m, m.idx[c.firstIndex + k + 1]),
+                     cc = pos(m, m.idx[c.firstIndex + k + 2]);
+          const Vec3 n = cross(b - a, cc - a);
+          if (dot(n, n) > 1e-20f) { fn.push_back(normalize(n)); axis = axis + fn.back(); }
+        }
+        c.coneCos = -1.0f;  // default: cannot be cone-culled
+        if (dot(axis, axis) > 1e-12f && !fn.empty()) {
+          axis = normalize(axis);
+          float minDot = 1.0f;
+          for (const Vec3& n : fn) minDot = std::min(minDot, dot(n, axis));
+          c.coneAxis = axis;
+          c.coneCos = minDot;
+        }
+        s.clusters.push_back(c);
+      }
+      r.clusterCount = uint32_t(s.clusters.size()) - r.firstCluster;
+    }
   s.description = huge ? "huge (320 m terrain + 480 towers + spheres, 3 LODs)"
                  : large ? "large (chunked terrain + spheres, 3 LODs)" : "small (session-1 scene)";
   return s;
 }
 
 CullStats buildDrawList(const Scene& s, const Mat4& M, Vec3 eye, float pxPerUnit, bool cullNear, int lodBias,
-                        std::vector<DrawItem>& out, std::vector<DrawItem>* transparentOut) {
+                        std::vector<DrawItem>& out, std::vector<DrawItem>* transparentOut, const Vec3* orthoDir,
+                        bool clusterCull) {
   out.clear();
   if (transparentOut) transparentOut->clear();
   // Clip-space half-spaces as world planes (Gribb-Hartmann): row3 +- row0/1.
@@ -445,22 +495,68 @@ CullStats buildDrawList(const Scene& s, const Mat4& M, Vec3 eye, float pxPerUnit
     const float l = std::sqrt(planes[p][0] * planes[p][0] + planes[p][1] * planes[p][1] + planes[p][2] * planes[p][2]);
     for (float& v : planes[p]) v /= l;
   }
+  // Sphere vs frustum: -1 outside, 0 intersecting, 1 inside.
+  auto classify = [&](Vec3 c, float r) {
+    int res = 1;
+    for (int p = 0; p < np; ++p) {
+      const float d = planes[p][0] * c.x + planes[p][1] * c.y + planes[p][2] * c.z + planes[p][3];
+      if (d < -r) return -1;
+      if (d < r) res = 0;
+    }
+    return res;
+  };
   CullStats st;
   for (const Object& o : s.objects) {
     if (o.transparent && !transparentOut) continue;
-    bool visible = true;
-    for (int p = 0; p < np && visible; ++p)
-      visible = planes[p][0] * o.center.x + planes[p][1] * o.center.y + planes[p][2] * o.center.z + planes[p][3] >= -o.radius;
-    if (!visible) continue;
+    const int vis = classify(o.center, o.radius);
+    if (vis < 0) continue;
     const Vec3 dv = o.center - eye;
     const float dist = std::sqrt(dot(dv, dv));
     const float d = std::max(dist - o.radius, 1e-3f);  // nearest point of the bounds
     int lod = 0;
     while (lod + 1 < o.lodCount && o.lodEdge[lod] * pxPerUnit / d < kLodTargetPx) ++lod;
     lod = std::clamp(lod + lodBias, 0, o.lodCount - 1);
-    (o.transparent ? *transparentOut : out).push_back({o.lod[lod]});
+    std::vector<DrawItem>& dst = o.transparent ? *transparentOut : out;
+    const LodRange& r = o.lod[lod];
     ++st.objectsVisible;
-    st.triangles += o.lod[lod].indexCount / 3;
+    if (!clusterCull || r.clusterCount == 0) {
+      dst.push_back({r});
+      st.triangles += r.indexCount / 3;
+      continue;
+    }
+    bool first = true;
+    for (uint32_t ci = r.firstCluster; ci < r.firstCluster + r.clusterCount; ++ci) {
+      const Cluster& c = s.clusters[ci];
+      ++st.clustersTested;
+      if (vis == 0 && classify(c.center, c.radius) < 0) continue;
+      // Back-facing cone test: every view direction towards the cluster makes
+      // an angle < 90 deg - cone half-angle with the cone axis.
+      if (c.coneCos > 0.0f) {
+        Vec3 vd;
+        float spread = 0.0f;  // angular radius of the bounding sphere seen from the eye
+        if (orthoDir) {
+          vd = *orthoDir;
+        } else {
+          const Vec3 e = c.center - eye;
+          const float l = std::sqrt(dot(e, e));
+          if (l <= c.radius) goto keep;
+          vd = e * (1.0f / l);
+          spread = std::asin(std::min(1.0f, c.radius / l));
+        }
+        {
+          const float coneAngle = std::acos(std::clamp(c.coneCos, -1.0f, 1.0f));
+          const float a = std::acos(std::clamp(dot(vd, c.coneAxis), -1.0f, 1.0f));
+          if (a + spread + coneAngle < 1.5707963f) { ++st.clustersBackface; continue; }
+        }
+      }
+    keep:
+      DrawItem it;
+      it.r.firstIndex = c.firstIndex;
+      it.r.indexCount = c.indexCount;
+      if (first) { it.r.firstVertex = r.firstVertex; it.r.vertexCount = r.vertexCount; first = false; }
+      dst.push_back(it);
+      st.triangles += c.indexCount / 3;
+    }
   }
   return st;
 }

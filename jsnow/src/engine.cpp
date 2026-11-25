@@ -63,7 +63,10 @@ Engine::Engine(ThreadPool& pool, const Scene& scene, Options o)
   }
   if (o.half) out_.resize(size_t(o.outW) * o.outH);
   if (o.taa && !o.checker) raw_.resize(n);
-  if (o.shadows) shadows_ = std::make_unique<ShadowMaps>(pool, scene);
+  if (o.shadows) {
+    shadows_ = std::make_unique<ShadowMaps>(pool, scene);
+    shadows_->clusterCull = o.meshlets;
+  }
 }
 
 Engine::~Engine() = default;
@@ -71,8 +74,9 @@ Engine::~Engine() = default;
 void Engine::renderScene(const Camera& cam, const Viewport& vp, int w, int h, std::vector<float>* hdr, float* depth,
                          uint32_t* ldr, StageTimes& st) {
   auto a = clk::now();
-  submitted_ = buildDrawList(scene_, cam.viewProj, cam.pos, lodPixelScale(cam), true, 0, draws_,
-                             o_.transparency ? &transparentDraws_ : nullptr).triangles;
+  cullStats_ = buildDrawList(scene_, cam.viewProj, cam.pos, lodPixelScale(cam), true, 0, draws_,
+                             o_.transparency ? &transparentDraws_ : nullptr, nullptr, o_.meshlets);
+  submitted_ = cullStats_.triangles;
   st.cull += ms(a, clk::now());
   if (shadows_) shadows_->update(cam, sunDirection(), st);
   PassParams pp;

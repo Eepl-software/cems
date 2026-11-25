@@ -38,6 +38,7 @@ class ShadowMaps final : public ShadowLookup {
   int calls_ = 0;
  public:
   int rendersLastUpdate = 0;
+  bool clusterCull = true;
 };
 
 }  // namespace jsnow

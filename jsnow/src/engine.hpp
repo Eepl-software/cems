@@ -19,6 +19,7 @@ struct Options {
   bool transparency = true;
   bool bloom = true;
   bool taa = true;  // temporal anti-aliasing (not combined with --checker)
+  bool meshlets = true;  // per-meshlet frustum + normal-cone culling
   float exposure = 1.6f;
   int outW = 1920, outH = 1080;
   std::string name() const;
@@ -43,6 +44,7 @@ class Engine {
   const uint32_t* renderFrame(int f, StageTimes& st);
   size_t binned() const { return rast_.lastBinnedTriangles(); }
   size_t submitted() const { return submitted_; }
+  const CullStats& cullStats() const { return cullStats_; }
 
  private:
   // Renders HDR into hdr (w x h) + depth, then tone maps into ldr.
@@ -67,6 +69,7 @@ class Engine {
   std::vector<DrawItem> draws_, transparentDraws_;
   int hist_ = 0;
   size_t submitted_ = 0;
+  CullStats cullStats_;
   Camera prevCam_;
 };
 

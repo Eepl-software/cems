@@ -90,7 +90,7 @@ void ShadowMaps::update(const Camera& cam, Vec3 L, StageTimes& st) {
     biasScale_[c] = texel / farZ;
 
     auto a = clk::now();
-    buildDrawList(scene_, vp, cam.pos, lodPixelScale(cam), false, shadowLodBias(c), draws_);
+    buildDrawList(scene_, vp, cam.pos, lodPixelScale(cam), false, shadowLodBias(c), draws_, nullptr, &fwd, clusterCull);
     inner.cull += std::chrono::duration<double, std::milli>(clk::now() - a).count();
     PassParams pp;
     pp.viewProj = vp;

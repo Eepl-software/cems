@@ -49,6 +49,8 @@ Tools installed in the session (needed again in a fresh container):
 | C5 TAA (shadow 2.3, post 1.3) | fast | 102 | 9.79 | 31.2 | 0.33 | 0.87 | 4.21 | 0.41 | – | 0.37 | raster+shade 4.2 |
 | D1 5M tris (shadow 9.7, post 6.8) | baseline | 20.9 | 47.86 | ref | 1.47 | 3.32 | 26.60 | – | – | – | raster+shade 26.6, shadow 9.7 |
 | D1 5M tris (shadow 5.2, post 1.4) | fast | 63.7 | 15.69 | 29.0 | 0.77 | 1.67 | 5.76 | 0.44 | – | 0.48 | raster+shade 5.8, shadow 5.2 |
+| D2 meshlets (shadow 9.8, post 6.8) | baseline | 20.7 | 48.20 | ref | 1.42 | 3.27 | 26.71 | – | – | – | raster+shade 26.7 |
+| D2 meshlets (shadow 4.6, post 1.3) | fast | 72.5 | 13.79 | 29.0 | 0.62 | 1.38 | 5.08 | 0.41 | – | 0.36 | raster+shade 5.1, shadow 4.6 |
 
 ## Decisions log
 - A1: `--fast` = half resolution + reuse (best trade-off found in session 1).
@@ -134,6 +136,16 @@ Tools installed in the session (needed again in a fresh container):
   480 cylinder towers (2880/720/168 tris, 1.5-4 m radius, 8-30 m tall, flagged as occluders),
   50 spheres, 8 glass spheres, water. 5,123,136 triangles at full detail (6.86M across all
   LODs, 3.7M vertices, built in 1.3 s). ~580k triangles submitted / ~286k binned per frame.
+- D2: meshlets. Every object LOD is cut into clusters of <= 128 consecutive triangles;
+  generators now emit quads in 8x8 blocks (terrain, cylinder sides, sphere bands) so a
+  cluster is compact. Each cluster stores a bounding sphere and a normal cone (mean face
+  normal + max deviation). Per frame: object frustum test + LOD, then per cluster frustum
+  test (only for objects straddling a plane) and cone back-face test (eye direction with the
+  sphere's angular radius; shadow passes use the light direction). `--no-meshlets`.
+  Result: submitted triangles 592k → 450k (-24%), but frame time is unchanged within noise:
+  setup was already rejecting those triangles cheaply, and only ~5% of clusters are
+  cone-culled (terrain faces the camera; coarse tower/sphere LOD blocks span 120-240°).
+  Meshlets are mainly the unit for D3's occlusion culling.
 
 ## Phase B optimisation rounds
 | round | change | baseline ms before → after | gain | fast ms before → after | gain |

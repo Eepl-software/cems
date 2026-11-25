@@ -22,6 +22,18 @@ struct Mesh {
 
 struct LodRange {
   uint32_t firstIndex = 0, indexCount = 0, firstVertex = 0, vertexCount = 0;
+  uint32_t firstCluster = 0, clusterCount = 0;  // meshlets of this range (Scene::clusters)
+};
+
+// Meshlet: up to kClusterTris consecutive triangles with bounds and a normal
+// cone (all face normals within acos(coneCos) of coneAxis) for back-face culling.
+constexpr uint32_t kClusterTris = 128;
+struct Cluster {
+  uint32_t firstIndex = 0, indexCount = 0;
+  Vec3 center;
+  float radius = 0;
+  Vec3 coneAxis;
+  float coneCos = -1;  // <= 0: never back-face culled
 };
 
 struct Object {
@@ -61,6 +73,7 @@ struct Scene {
   std::vector<Object> objects;
   std::vector<Material> materials;
   std::vector<PointLight> lights;
+  std::vector<Cluster> clusters;
   TextureArray textures;  // one layer per material texture
   size_t fullDetailTriangles = 0;  // sum of LOD0 triangle counts
   std::string description;
@@ -73,11 +86,13 @@ float terrainHeight(float x, float z);
 // Huge: ~5,000,000 triangles at full detail (Phase D), 3 LODs per object.
 Scene buildScene(ThreadPool& pool, SceneKind kind, int textureSize = 2048, int pointLights = 128);
 
-// Frustum test of every object, LOD selection by projected size, draw list out.
-// Returns the number of triangles submitted.
+// Frustum test of every object, LOD selection by projected size, then per
+// meshlet frustum + normal-cone back-face culling (orthoDir = view direction of
+// an orthographic pass, e.g. the shadow camera). Returns submitted triangles.
 struct CullStats {
   int objectsVisible = 0;
   size_t triangles = 0;
+  size_t clustersTested = 0, clustersBackface = 0, clustersOccluded = 0;
 };
 // LOD: the finest level whose projected edge is >= kLodTargetPx pixels at a
 // 1080-line reference (pixelsPerUnitAt1m = 1080 / (2 tan(fovy/2))).
@@ -86,6 +101,7 @@ constexpr float kLodTargetPx = 5.0f;
 // (shadow passes: transparent objects do not cast shadows).
 CullStats buildDrawList(const Scene& s, const Mat4& viewProj, Vec3 lodEye, float pixelsPerUnitAt1m,
                         bool cullNear, int lodBias, std::vector<DrawItem>& out,
-                        std::vector<DrawItem>* transparentOut = nullptr);
+                        std::vector<DrawItem>* transparentOut = nullptr, const Vec3* orthoDir = nullptr,
+                        bool clusterCull = true);
 
 }  // namespace jsnow
