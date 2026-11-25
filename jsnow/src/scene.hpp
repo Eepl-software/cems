@@ -68,12 +68,20 @@ struct DrawItem {
 
 enum class SceneKind { Small, Large, Huge };
 
+// Optional residency check for LOD streaming: returns the LOD to draw for a
+// desired one (may be coarser while the desired data is not loaded).
+struct LodProvider {
+  virtual ~LodProvider() = default;
+  virtual int pick(size_t object, int desired, float distance) const = 0;
+};
+
 struct Scene {
   Mesh mesh;
   std::vector<Object> objects;
   std::vector<Material> materials;
   std::vector<PointLight> lights;
   std::vector<Cluster> clusters;
+  const LodProvider* lodProvider = nullptr;  // set when streaming
   TextureArray textures;  // one layer per material texture
   size_t fullDetailTriangles = 0;  // sum of LOD0 triangle counts
   std::string description;

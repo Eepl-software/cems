@@ -2,6 +2,7 @@
 
 #include "occlusion.hpp"
 #include "shadow.hpp"
+#include "streaming.hpp"
 
 #include <chrono>
 #include <algorithm>
@@ -131,6 +132,7 @@ void Engine::renderScene(const Camera& cam, const Viewport& vp, int w, int h, st
 
 const uint32_t* Engine::renderFrame(int f, StageTimes& st) {
   const Camera cam = cameraAt(f, float(o_.outW) / float(o_.outH));
+  if (o_.streamer) o_.streamer->beginFrame();
   const bool temporal = o_.checker || o_.reuse;
   const bool taa = o_.taa && !o_.checker;
   const int cur = ((o_.reuse || taa) && f > 0) ? (hist_ ^ 1) : hist_;

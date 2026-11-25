@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -11,6 +12,7 @@
 #include "engine.hpp"
 #include "png.hpp"
 #include "simd.hpp"
+#include "streaming.hpp"
 
 using namespace jsnow;
 
@@ -28,13 +30,14 @@ double mse(const uint32_t* a, const uint32_t* b, size_t n) {
 
 struct Result {
   std::string name;
-  double avgMs = 0, fps = 0, p99Ms = 0, psnrDb = 0, binned = 0, submitted = 0, clusters = 0, backface = 0, occluded = 0, objOccluded = 0;
+  double avgMs = 0, fps = 0, p99Ms = 0, psnrDb = 0, binned = 0, submitted = 0, clusters = 0, backface = 0, occluded = 0, objOccluded = 0, fallback = 0;
+  std::string streamInfo;
   StageTimes stages;
   int frames = 0;
 };
 
 Result runConfig(ThreadPool& pool, const Scene& scene, const Options& o, int frames, int pngFrame,
-                 const std::string& pngPath, bool quality) {
+                 const std::string& pngPath, bool quality, const Scene* refScene = nullptr) {
   using clk = std::chrono::steady_clock;
   Result r;
   r.name = o.name();
@@ -57,10 +60,21 @@ Result runConfig(ThreadPool& pool, const Scene& scene, const Options& o, int fra
     r.backface += double(e.cullStats().clustersBackface) / frames;
     r.occluded += double(e.cullStats().clustersOccluded) / frames;
     r.objOccluded += double(e.cullStats().objectsOccluded) / frames;
+    if (o.streamer) {
+      const Streamer::Stats ss = o.streamer->stats();
+      r.fallback += ss.picks ? double(ss.fallbacks) / double(ss.picks) / frames : 0.0;
+    }
     if (f == pngFrame && !pngPath.empty()) {
       if (writePNG(pngPath, o.outW, o.outH, img)) std::printf("  saved frame %d -> %s\n", f, pngPath.c_str());
       else std::printf("  failed to write %s\n", pngPath.c_str());
     }
+  }
+  if (o.streamer) {
+    const Streamer::Stats ss = o.streamer->stats();
+    char buf[256];
+    std::snprintf(buf, sizeof buf, "stream: %.1f%% of LOD picks fell back to a coarser LOD, %.0f MB streamed in %zu loads "
+                  "(%zu evictions), %.0f MB resident", 100.0 * r.fallback, ss.streamedMB, ss.loads, ss.evictions, ss.residentMB);
+    r.streamInfo = buf;
   }
   double total = 0;
   for (double m : frameMs) total += m;
@@ -73,9 +87,10 @@ Result runConfig(ThreadPool& pool, const Scene& scene, const Options& o, int fra
   if (quality) {
     // Untimed second pass: compare every 5th frame to the full-quality renderer.
     Options ref;
+    ref.streamer = nullptr;
     ref.outW = o.outW; ref.outH = o.outH; ref.shadows = o.shadows; ref.pointLights = o.pointLights; ref.transparency = o.transparency; ref.bloom = o.bloom; ref.taa = o.taa; ref.meshlets = o.meshlets; ref.occlusion = o.occlusion; ref.occlusionPrepass = o.occlusionPrepass;
     ref.exposure = o.exposure;
-    Engine test(pool, scene, o), reference(pool, scene, ref);
+    Engine test(pool, scene, o), reference(pool, refScene ? *refScene : scene, ref);
     StageTimes dummy;
     double sum = 0;
     int count = 0;
@@ -100,6 +115,7 @@ void printResult(const Result& r) {
   std::printf("  [%.0f tris submitted, %.0f binned; meshlets: %.0f tested, %.0f back-facing, %.0f occluded; "
               "%.0f objects occluded]\n",
               r.submitted, r.binned, r.clusters, r.backface, r.occluded, r.objOccluded);
+  if (!r.streamInfo.empty()) std::printf("    %s\n", r.streamInfo.c_str());
   std::printf("    ms/frame: cull %.2f | shadow %.2f | vertex %.2f | setup+bin %.2f | raster+shade %.2f | "
               "post %.2f | reproject %.2f | compose %.2f | upscale %.2f\n",
               r.stages.cull / n, r.stages.shadow / n, r.stages.vertex / n, r.stages.setup / n,
@@ -123,6 +139,9 @@ void usage() {
       "  --no-meshlets   disable per-meshlet (cluster) frustum + back-face culling\n"
       "  --no-occlusion  disable hierarchical-Z occlusion culling\n"
       "  --occlusion-prepass  HiZ from an occluder pre-pass instead of last frame's depth\n"
+      "  --stream        LOD streaming of LOD0/LOD1 from a simulated device\n"
+      "  --stream-budget MB   resident budget for streamed LODs (default 64)\n"
+      "  --stream-bw MB/s     simulated device bandwidth (default 1000, + 2 ms latency per load)\n"
       "  --lights N      number of point lights (default 128, max 255)\n"
       "  --exposure E    tone-mapping exposure (default 1.6)\n"
       "  --scene S       huge (default: 5M tris), large (1M tris) or small (100k, session 1)\n"
@@ -141,7 +160,8 @@ void usage() {
 
 int main(int argc, char** argv) {
   Options o;
-  bool bench = false, benchFast = false, quality = false;
+  bool bench = false, benchFast = false, quality = false, stream = false;
+  double streamBudgetMB = 64, streamBwMBs = 1000;
   int frames = 300, threads = int(std::thread::hardware_concurrency()), pngFrame = 150, texSize = 2048, lights = 128;
   SceneKind kind = SceneKind::Huge;
   std::string png = "jsnow.png";
@@ -164,6 +184,9 @@ int main(int argc, char** argv) {
     else if (a == "--no-meshlets") o.meshlets = false;
     else if (a == "--no-occlusion") o.occlusion = false;
     else if (a == "--occlusion-prepass") o.occlusionPrepass = true;
+    else if (a == "--stream") stream = true;
+    else if (a == "--stream-budget") streamBudgetMB = std::atof(next().c_str());
+    else if (a == "--stream-bw") streamBwMBs = std::atof(next().c_str());
     else if (a == "--exposure") o.exposure = float(std::atof(next().c_str()));
     else if (a == "--bench") bench = true;
     else if (a == "--bench-fast") bench = benchFast = true;
@@ -199,8 +222,17 @@ int main(int argc, char** argv) {
               scene.mesh.vertexCount(), size_t(scene.textures.layers), texSize, texSize, scene.lights.size(), buildMs, o.outW, o.outH,
               threads, simd::backendName(), frames, o.shadows ? "on" : "off");
 
+  std::unique_ptr<Streamer> streamer;
+  std::unique_ptr<Scene> refScene;
+  if (stream) {
+    if (quality) refScene = std::make_unique<Scene>(buildScene(pool, kind, texSize, lights));  // fully resident
+    streamer = std::make_unique<Streamer>(scene, size_t(streamBudgetMB * 1e6), streamBwMBs);
+    scene.lodProvider = streamer.get();
+    o.streamer = streamer.get();
+    std::printf("       LOD streaming: budget %.0f MB, %.0f MB/s + 2 ms latency per load\n", streamBudgetMB, streamBwMBs);
+  }
   if (!bench) {
-    printResult(runConfig(pool, scene, o, frames, pngFrame, png, quality));
+    printResult(runConfig(pool, scene, o, frames, pngFrame, png, quality, refScene.get()));
     return 0;
   }
   // 0 baseline, 1 half, 2 checker, 3 reuse, 4 all, 5 fast (half+reuse)
@@ -213,7 +245,7 @@ int main(int argc, char** argv) {
     c.reuse = k == 3 || k == 4 || k == 5;
     std::string path = png.empty() ? "" : "jsnow_" + c.name() + ".png";
     std::replace(path.begin(), path.end(), '+', '_');
-    results.push_back(runConfig(pool, scene, c, frames, pngFrame, path, quality));
+    results.push_back(runConfig(pool, scene, c, frames, pngFrame, path, quality, refScene.get()));
     printResult(results.back());
   }
   std::printf("\n| config | FPS | ms/frame | speed-up |%s\n|---|---:|---:|---:|%s\n",

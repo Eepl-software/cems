@@ -509,7 +509,8 @@ CullStats buildDrawList(const Scene& s, const Mat4& M, Vec3 eye, float pxPerUnit
     return res;
   };
   CullStats st;
-  for (const Object& o : s.objects) {
+  for (size_t oi = 0; oi < s.objects.size(); ++oi) {
+    const Object& o = s.objects[oi];
     if (o.transparent && !transparentOut) continue;
     if (occludersOnly && !o.occluder) continue;
     const int vis = classify(o.center, o.radius);
@@ -521,6 +522,7 @@ CullStats buildDrawList(const Scene& s, const Mat4& M, Vec3 eye, float pxPerUnit
     int lod = 0;
     while (lod + 1 < o.lodCount && o.lodEdge[lod] * pxPerUnit / d < kLodTargetPx) ++lod;
     lod = std::clamp(lod + lodBias, 0, o.lodCount - 1);
+    if (s.lodProvider) lod = s.lodProvider->pick(oi, lod, dist);
     std::vector<DrawItem>& dst = o.transparent ? *transparentOut : out;
     const LodRange& r = o.lod[lod];
     ++st.objectsVisible;

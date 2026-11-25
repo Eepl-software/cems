@@ -10,6 +10,8 @@
 
 namespace jsnow {
 
+class Streamer;
+
 struct Options {
   bool half = false;     // render at half resolution, upscale
   bool checker = false;  // 1/4 of the pixels per frame, rotating 2x2 pattern
@@ -22,6 +24,7 @@ struct Options {
   bool meshlets = true;  // per-meshlet frustum + normal-cone culling
   bool occlusion = true;  // hierarchical-Z occlusion culling (needs meshlets for per-cluster tests)
   bool occlusionPrepass = false;  // occluders rasterized each frame instead of last frame's depth
+  Streamer* streamer = nullptr;   // LOD streaming (scene.lodProvider must point to it)
   float exposure = 1.6f;
   int outW = 1920, outH = 1080;
   std::string name() const;

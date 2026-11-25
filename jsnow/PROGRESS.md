@@ -53,6 +53,9 @@ Tools installed in the session (needed again in a fresh container):
 | D2 meshlets (shadow 4.6, post 1.3) | fast | 72.5 | 13.79 | 29.0 | 0.62 | 1.38 | 5.08 | 0.41 | – | 0.36 | raster+shade 5.1, shadow 4.6 |
 | D3 HiZ occlusion (shadow 9.9, post 7.0, cull 1.3) | baseline | 20.6 | 48.58 | ref | 1.37 | 3.02 | 25.98 | – | – | – | raster+shade 26.0 (pixel shading, not triangles) |
 | D3 HiZ occlusion (shadow 4.6, post 1.2, cull 0.5) | fast | 72.4 | 13.81 | 29.0 | 0.59 | 1.24 | 4.86 | 0.43 | – | 0.38 | raster+shade 4.9, shadow 4.6 |
+| D4 LOD streaming `--stream` 64 MB (shadow 9.6, post 6.5) | baseline | 21.5 | 46.41 | 99.0 vs fully resident | 1.26 | 2.88 | 24.85 | – | – | – | raster+shade 24.9 |
+| D4 LOD streaming `--stream` 64 MB (shadow 4.7, post 1.2) | fast | 71.6 | 13.96 | 29.0 | 0.61 | 1.25 | 4.90 | 0.43 | – | 0.38 | raster+shade 4.9, shadow 4.7 |
+| D4 `--stream --stream-budget 16` (thrashing) | baseline | 22.4 | 44.73 | 45.2 vs fully resident | 1.21 | 2.44 | 23.55 | – | – | – | 5.7% of LOD picks fall back |
 
 ## Decisions log
 - A1: `--fast` = half resolution + reuse (best trade-off found in session 1).
@@ -164,6 +167,21 @@ Tools installed in the session (needed again in a fresh container):
   Honest result: binned triangles −14%, frame time unchanged within noise. This view
   looks down over the field, only ~9% of meshlets are hidden, and the remaining cost is
   per-pixel shading, which occlusion does not reduce. `--no-occlusion`.
+- D4: LOD streaming (`--stream`, `streaming.cpp`). LOD0/LOD1 of every object (6,8M-tri
+  scene: 5.1M + 1.3M tris) start non-resident: their slice of the mesh arrays is zeroed
+  and the bytes live in a per-entry backing store (stand-in for the disk). Every pass asks
+  `Scene::lodProvider` for the LOD it wants and draws the finest resident LOD at or coarser
+  than it (the coarsest LOD is always resident); misses enqueue a load. A background thread
+  serves the queue nearest-first, `memcpy`s the data back into place, throttles to a
+  simulated device (1000 MB/s + 2 ms per load, `--stream-bw`) and evicts LRU entries not
+  used in the last 2 frames when over budget (`--stream-budget`, default 64 MB).
+  Honest limits: data movement is real but memory is not actually released (regions are
+  fixed in the arrays); warm-up frames pre-stream the start area; the quality reference
+  is a second fully resident copy of the scene.
+  Results (300 frames): 64 MB → 34 MB loaded in 751 loads, 0.3% fallback picks, PSNR 99 dB
+  (no visible difference), no measurable cost. 16 MB → thrashing: 6,314 loads / 5,909
+  evictions, 394 MB streamed, 5.7% fallbacks, PSNR 45 dB.
+- **Phase D features complete** (5M tris, meshlets, HiZ, streaming). Next: repeat Phase B.
 
 ## Phase B optimisation rounds
 | round | change | baseline ms before → after | gain | fast ms before → after | gain |
@@ -193,6 +211,5 @@ Quality pass now renders the reference every frame so its caches stay in step.
 - **Phase B stopped after B7**: B5, B6, B7 each gained <10% (stop rule). Phase B total:
   baseline 44.57 → 18.91 ms (2.36x), fast 13.38 → 6.48 ms (2.06x).
   Remaining profile (baseline): tile shading ~8 ms, visibility raster ~4.5 ms, shadow passes 4.4, setup 1.7.
-- Phase D: D1 5M-triangle scene; D2 meshlets (triangle clusters with bounds + normal cones);
-  D3 hierarchical-Z occlusion culling; D4 LOD streaming (residency budget + background loads);
-  then repeat Phase B (targets: raster+shade, TAA 3.5 ms, bloom 2.5 ms, shadows 4.8 ms).
+- Phase D2-B (repeat of Phase B on the 5M scene): targets raster+shade ~25 ms (tile shading),
+  shadows ~9.7 ms, post ~6.7 ms (TAA ~3.5, bloom ~2.5), setup ~2.9, cull ~1.3.
