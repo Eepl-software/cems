@@ -26,6 +26,7 @@ struct Options {
   int outW = 1920, outH = 1080;
   std::string name() const {
     if (!half && !checker && !reuse) return "baseline";
+    if (half && reuse && !checker) return "fast";
     std::string s;
     auto add = [&](const char* t) { s += s.empty() ? t : std::string("+") + t; };
     if (half) add("half");
@@ -243,6 +244,8 @@ void usage() {
       "  --checker       trick 2: draw 1/4 of the pixels per frame (rotating 2x2 pattern)\n"
       "  --reuse         trick 3: reuse earlier frames via per-pixel motion vectors\n"
       "  --all           all three tricks\n"
+      "  --fast          half resolution + reuse (best speed/quality trade-off)\n"
+      "  --bench-fast    benchmark baseline and --fast only (with --quality: PSNR)\n"
       "  --bench         run baseline, each trick, and all tricks; print a table\n"
       "  --quality       also measure PSNR against the full-quality renderer (untimed)\n"
       "  --frames N      frames per run (default 300)\n"
@@ -256,7 +259,7 @@ void usage() {
 
 int main(int argc, char** argv) {
   Options o;
-  bool bench = false, quality = false;
+  bool bench = false, benchFast = false, quality = false;
   int frames = 300, threads = int(std::thread::hardware_concurrency()), pngFrame = 150;
   std::string png = "jsnow.png";
   for (int i = 1; i < argc; ++i) {
@@ -269,6 +272,8 @@ int main(int argc, char** argv) {
     else if (a == "--checker") o.checker = true;
     else if (a == "--reuse") o.reuse = true;
     else if (a == "--all") o.half = o.checker = o.reuse = true;
+    else if (a == "--fast") o.half = o.reuse = true;
+    else if (a == "--bench-fast") bench = benchFast = true;
     else if (a == "--bench") bench = true;
     else if (a == "--quality") quality = true;
     else if (a == "--frames") frames = std::max(1, std::atoi(next().c_str()));
@@ -300,12 +305,14 @@ int main(int argc, char** argv) {
     return 0;
   }
   std::vector<Options> configs;
-  for (int k = 0; k < 5; ++k) {
+  // 0 baseline, 1 half, 2 checker, 3 reuse, 4 all, 5 fast (half+reuse)
+  const std::vector<int> set = benchFast ? std::vector<int>{0, 5} : std::vector<int>{0, 1, 2, 3, 4, 5};
+  for (int k : set) {
     Options c;
     c.outW = o.outW; c.outH = o.outH;
-    c.half = k == 1 || k == 4;
+    c.half = k == 1 || k == 4 || k == 5;
     c.checker = k == 2 || k == 4;
-    c.reuse = k == 3 || k == 4;
+    c.reuse = k == 3 || k == 4 || k == 5;
     configs.push_back(c);
   }
   std::vector<Result> results;
