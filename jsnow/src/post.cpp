@@ -1,5 +1,7 @@
 #include "post.hpp"
 
+#include "simd.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -19,17 +21,6 @@ int iterations() {
   }();
   return n;
 }
-#if defined(__AVX2__)
-// Hardware gathers are slow on CPUs with the Gather Data Sampling microcode
-// mitigation; eight scalar loads are faster there and never much slower.
-template <class T>
-inline __m256i gather32(const T* base, __m256i idx) {
-  alignas(32) int i[8];
-  _mm256_store_si256(reinterpret_cast<__m256i*>(i), idx);
-  const int32_t* b = reinterpret_cast<const int32_t*>(base);
-  return _mm256_setr_epi32(b[i[0]], b[i[1]], b[i[2]], b[i[3]], b[i[4]], b[i[5]], b[i[6]], b[i[7]]);
-}
-#endif
 inline int blocks(int rows) { return (rows + kRowBlock - 1) / kRowBlock; }
 }  // namespace
 
@@ -89,59 +80,53 @@ void Reprojector::run(ThreadPool& pool, int w, int h, const uint32_t* prevColor,
     };
     for (int y = y0; y < y1; ++y) {
       int x = 0;
-#if defined(__AVX2__) && defined(__FMA__)
-      const __m256 lane = _mm256_setr_ps(0.5f, 1.5f, 2.5f, 3.5f, 4.5f, 5.5f, 6.5f, 7.5f);
-      const __m256 pcy = _mm256_set1_ps(y + 0.5f);
-      const __m256 vAx0 = _mm256_set1_ps(Ax[0]), vAy0 = _mm256_set1_ps(Ay[0]), vAd0 = _mm256_set1_ps(Ad[0]), vA00 = _mm256_set1_ps(A0[0]);
-      const __m256 vAx1 = _mm256_set1_ps(Ax[1]), vAy1 = _mm256_set1_ps(Ay[1]), vAd1 = _mm256_set1_ps(Ad[1]), vA01 = _mm256_set1_ps(A0[1]);
-      const __m256 vAx3 = _mm256_set1_ps(Ax[3]), vAy3 = _mm256_set1_ps(Ay[3]), vAd3 = _mm256_set1_ps(Ad[3]), vA03 = _mm256_set1_ps(A0[3]);
-      const __m256 vhw = _mm256_set1_ps(hw), vhh = _mm256_set1_ps(hh), half = _mm256_set1_ps(0.5f);
-      const __m256 minD = _mm256_set1_ps(1e-4f), eps = _mm256_set1_ps(1e-6f), one = _mm256_set1_ps(1.0f);
-      const __m256 two = _mm256_set1_ps(2.0f), zero = _mm256_setzero_ps(), fw = _mm256_set1_ps(float(w));
-      const __m256 maxX = _mm256_set1_ps(float(w - 1)), maxY = _mm256_set1_ps(float(h - 1));
-      const __m256 absMask = _mm256_castsi256_ps(_mm256_set1_epi32(0x7FFFFFFF));
+#if !defined(JSNOW_SIMD_SCALAR)
+      using namespace simd;
+      const vf lane = iotaf() + set1(0.5f);
+      const vf pcy = set1(y + 0.5f);
+      const vf vAx0 = set1(Ax[0]), vAy0 = set1(Ay[0]), vAd0 = set1(Ad[0]), vA00 = set1(A0[0]);
+      const vf vAx1 = set1(Ax[1]), vAy1 = set1(Ay[1]), vAd1 = set1(Ad[1]), vA01 = set1(A0[1]);
+      const vf vAx3 = set1(Ax[3]), vAy3 = set1(Ay[3]), vAd3 = set1(Ad[3]), vA03 = set1(A0[3]);
+      const vf vhw = set1(hw), vhh = set1(hh), half = set1(0.5f);
+      const vf minD = set1(1e-4f), eps = set1(1e-6f), one = set1(1.0f);
+      const vf zero = zerof(), fw = set1(float(w));
+      const vf maxX = set1(float(w - 1)), maxY = set1(float(h - 1));
       // State of one group of 8 output pixels. Source coordinates are kept as
       // floats holding integers, so the linear index needs no integer multiply.
       struct G {
-        __m256 pcx, sx, sy;  // output pixel centre x; integer source pixel
-        __m256 cx, cy, nd, ok;
-        __m256i idx;
+        vf pcx, sx, sy;  // output pixel centre x; integer source pixel
+        vf cx, cy, nd;
+        vm ok;
+        vi idx;
       };
       auto eval = [&](G& g) {
-        g.idx = _mm256_cvttps_epi32(_mm256_fmadd_ps(g.sy, fw, g.sx));
-        const __m256 d = _mm256_max_ps(_mm256_castsi256_ps(gather32(prevDepth, g.idx)), minD);
-        const __m256 px = _mm256_add_ps(g.sx, half), py = _mm256_add_ps(g.sy, half);
-        const __m256 X = _mm256_fmadd_ps(vAx0, px, _mm256_fmadd_ps(vAy0, py, _mm256_fmadd_ps(vAd0, d, vA00)));
-        const __m256 Y = _mm256_fmadd_ps(vAx1, px, _mm256_fmadd_ps(vAy1, py, _mm256_fmadd_ps(vAd1, d, vA01)));
-        const __m256 W = _mm256_fmadd_ps(vAx3, px, _mm256_fmadd_ps(vAy3, py, _mm256_fmadd_ps(vAd3, d, vA03)));
-        g.ok = _mm256_cmp_ps(W, eps, _CMP_GT_OQ);
-        const __m256 Ws = _mm256_blendv_ps(one, W, g.ok);
-        __m256 iw = _mm256_rcp_ps(Ws);
-        iw = _mm256_mul_ps(iw, _mm256_fnmadd_ps(Ws, iw, two));  // one Newton step
-        g.cx = _mm256_fmadd_ps(_mm256_mul_ps(X, iw), vhw, vhw);
-        g.cy = _mm256_fnmadd_ps(_mm256_mul_ps(Y, iw), vhh, vhh);
-        g.nd = _mm256_and_ps(_mm256_mul_ps(d, iw), g.ok);
+        g.idx = trunc_i(fma(g.sy, fw, g.sx));
+        const vf d = max(gatherf(prevDepth, g.idx), minD);
+        const vf px = g.sx + half, py = g.sy + half;
+        const vf X = fma(vAx0, px, fma(vAy0, py, fma(vAd0, d, vA00)));
+        const vf Y = fma(vAx1, px, fma(vAy1, py, fma(vAd1, d, vA01)));
+        const vf W = fma(vAx3, px, fma(vAy3, py, fma(vAd3, d, vA03)));
+        g.ok = W > eps;
+        const vf iw = rcp(select(g.ok, W, one));
+        g.cx = fma(X * iw, vhw, vhw);
+        g.cy = fnma(Y * iw, vhh, vhh);
+        g.nd = maskf(g.ok, d * iw);
         // Next estimate: q = p - mv = p - (c - src_centre).
-        const __m256 qx = _mm256_sub_ps(g.pcx, _mm256_sub_ps(g.cx, px));
-        const __m256 qy = _mm256_sub_ps(pcy, _mm256_sub_ps(g.cy, py));
-        const __m256 fx = _mm256_floor_ps(qx), fy = _mm256_floor_ps(qy);
-        return std::pair{_mm256_min_ps(_mm256_max_ps(fx, zero), maxX), _mm256_min_ps(_mm256_max_ps(fy, zero), maxY)};
+        const vf qx = g.pcx - (g.cx - px), qy = pcy - (g.cy - py);
+        return std::pair{clamp(floor(qx), zero, maxX), clamp(floor(qy), zero, maxY)};
       };
       auto finish = [&](G& g, int xs) {
-        const __m256 ex = _mm256_and_ps(_mm256_sub_ps(g.cx, g.pcx), absMask);
-        const __m256 ey = _mm256_and_ps(_mm256_sub_ps(g.cy, pcy), absMask);
-        __m256 v = _mm256_and_ps(_mm256_cmp_ps(ex, one, _CMP_LE_OQ), _mm256_cmp_ps(ey, one, _CMP_LE_OQ));
-        v = _mm256_and_ps(v, g.ok);
+        const vm v = (abs(g.cx - g.pcx) <= one) & (abs(g.cy - pcy) <= one) & g.ok;
         const size_t o = size_t(y) * w + xs;
-        _mm256_storeu_si256(reinterpret_cast<__m256i*>(outColor + o), gather32(prevColor, g.idx));
-        _mm256_storeu_ps(outDepth + o, g.nd);
-        const int m = _mm256_movemask_ps(v);
+        storeui(outColor + o, gather(prevColor, g.idx));
+        storeu(outDepth + o, g.nd);
+        const int m = bits(v);
         for (int k = 0; k < 8; ++k) valid[o + k] = uint8_t((m >> k) & 1);
       };
       auto init = [&](G& g, int xs) {
-        g.pcx = _mm256_add_ps(_mm256_set1_ps(float(xs)), lane);
-        g.sx = _mm256_sub_ps(g.pcx, half);
-        g.sy = _mm256_set1_ps(float(y));
+        g.pcx = set1(float(xs)) + lane;
+        g.sx = g.pcx - half;
+        g.sy = set1(float(y));
       };
       // Two independent groups per loop iteration so their dependency chains overlap.
       for (; x + 16 <= w; x += 16) {

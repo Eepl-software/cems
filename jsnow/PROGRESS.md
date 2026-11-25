@@ -27,6 +27,8 @@ Tools installed in the session (needed again in a fresh container):
 | A3 shadows | fast | 128 | 7.82 | 33.9 | 0.10 | 0.44 | 3.17 | 0.45 | – | 0.37 | shadow passes 3.3 (resolution independent) |
 | A4 1M tris (shadow 10.4) | baseline | 22.9 | 43.63 | ref | 0.62 | 2.63 | 29.97 | – | – | – | raster: forward shading of tiny triangles wastes 8-lane groups |
 | A4 1M tris (shadow 5.4) | fast | 71.7 | 13.94 | 33.9 | 0.31 | 1.26 | 6.12 | 0.50 | – | 0.39 | raster 6.1, shadow 5.4 |
+| A5 NEON (x86 numbers; shadow 10.9) | baseline | 22.4 | 44.57 | ref | 0.70 | 2.75 | 30.18 | – | – | – | raster |
+| A5 NEON (x86 numbers; shadow 5.2) | fast | 74.7 | 13.38 | 33.9 | 0.31 | 1.22 | 5.85 | 0.44 | – | 0.37 | raster ≈ shadow |
 
 ## Decisions log
 - A1: `--fast` = half resolution + reuse (best trade-off found in session 1).
@@ -50,6 +52,13 @@ Tools installed in the session (needed again in a fresh container):
   near planes; shadow passes side planes only). LOD = finest level whose edge projects to
   >= 5 px at a 1080-line reference. ~300k triangles submitted/frame, ~160k survive setup.
   `--scene small` keeps the 100k session-1 scene.
+- A5: NEON backend lives in `simd.hpp` (two float32x4 per 8-lane value). Reprojection was
+  ported from raw AVX2 to the wrapper. The 2x upscale keeps an AVX2 fast path; on other
+  ISAs it uses the portable SWAR loop. Cross-build: `cmake -DCMAKE_TOOLCHAIN_FILE=cmake/aarch64-linux-gnu.cmake`.
+  **Tested under qemu-aarch64 emulation**: output matches the AVX2 build at 70.3 dB PSNR
+  (max channel diff 2/255, from rcp/rsqrt estimate differences); the forced-scalar build
+  (`-DJSNOW_FORCE_SCALAR`) matches too. **Not performance-tested on real Apple Silicon**
+  (qemu timings are meaningless); not compile-tested with Apple clang / macOS SDK.
 
 ## Done
 - Session 1: tiled AVX2 rasterizer, half/checker/reuse tricks, benchmark harness.
@@ -57,7 +66,7 @@ Tools installed in the session (needed again in a fresh container):
 - A2: textures (2048², mips, bilinear, SIMD sampling).
 - A3: sun + 3-cascade shadow maps.
 - A4: 1M-triangle scene, frustum culling, 3 LODs.
+- A5: NEON path (cross-compiled, functionally verified under qemu).
 
 ## Next
-- A5 NEON path (cross-compile + qemu test).
 - Phase B: first target = forward shading of tiny triangles (move to deferred / visibility buffer).
