@@ -1,5 +1,7 @@
 #include "engine.hpp"
 
+#include "shadow.hpp"
+
 #include <chrono>
 #include <cmath>
 
@@ -21,7 +23,7 @@ std::string Options::name() const {
   return s;
 }
 
-Vec3 sunDirection() { return normalize(Vec3{0.45f, 0.75f, 0.3f}); }
+Vec3 sunDirection() { return normalize(Vec3{0.62f, 0.42f, 0.32f}); }
 
 // Deterministic fly-over: 60 Hz time steps.
 Camera cameraAt(int frame, float aspect) {
@@ -51,22 +53,23 @@ Engine::Engine(ThreadPool& pool, const Scene& scene, Options o)
   for (int i = 0; i < 2; ++i) { color_[i].assign(n, kSkyColor); depth_[i].assign(n, 0.0f); }
   if (o.checker) { subColor_.resize(n / 4); subDepth_.resize(n / 4); }
   if (o.half) out_.resize(size_t(o.outW) * o.outH);
+  if (o.shadows) shadows_ = std::make_unique<ShadowMaps>(pool, scene);
 }
 
-class ShadowMaps {};  // implemented in A3
 Engine::~Engine() = default;
 
 void Engine::renderScene(const Camera& cam, const Viewport& vp, const Target& t, StageTimes& st) {
   auto a = clk::now();
   submitted_ = buildDrawList(scene_, cam.viewProj, cam.pos, true, 0, draws_).triangles;
   st.cull += ms(a, clk::now());
+  if (shadows_) shadows_->update(cam, sunDirection(), st);
   PassParams pp;
   pp.viewProj = cam.viewProj;
   pp.vp = vp;
   pp.mode = PassMode::Shaded;
   pp.camPos = cam.pos;
   pp.sunDir = sunDirection();
-  pp.shadow = nullptr;
+  pp.shadow = shadows_.get();
   rast_.render(pp, draws_, t, st);
 }
 

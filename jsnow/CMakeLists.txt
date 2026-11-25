@@ -15,6 +15,7 @@ add_executable(jsnow
   src/main.cpp
   src/engine.cpp
   src/texture.cpp
+  src/shadow.cpp
   src/scene.cpp
   src/raster.cpp
   src/post.cpp

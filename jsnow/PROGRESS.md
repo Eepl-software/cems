@@ -23,6 +23,8 @@ Tools installed in the session (needed again in a fresh container):
 | A1 --fast | fast | 475 | 2.10 | 33.8 | 0.10 | 0.34 | 0.87 | 0.44 | – | 0.35 | raster ≈ reproject+upscale |
 | A2 textures | baseline | 92 | 10.91 | ref | 0.18 | 0.85 | 9.87 | – | – | – | raster: texture sampling + per-pixel attrs |
 | A2 textures | fast | 306 | 3.27 | 32.9 | 0.09 | 0.39 | 2.01 | 0.44 | – | 0.33 | raster |
+| A3 shadows | baseline | 40.5 | 24.72 | ref | 0.24 | 1.01 | 16.69 | – | – | – | raster (shadow lookups in forward shading of overdrawn px) 16.7, shadow passes 6.8 |
+| A3 shadows | fast | 128 | 7.82 | 33.9 | 0.10 | 0.44 | 3.17 | 0.45 | – | 0.37 | shadow passes 3.3 (resolution independent) |
 
 ## Decisions log
 - A1: `--fast` = half resolution + reuse (best trade-off found in session 1).
@@ -35,11 +37,17 @@ Tools installed in the session (needed again in a fresh container):
   (GL_LINEAR_MIPMAP_NEAREST), repeat wrap, 4 lane-wise gathers per pixel.
   Depth buffer now stores z/w = near/w (reprojection takes a depth scale).
   Scene = objects with up to 3 LOD index ranges + per-triangle material; draw lists per pass.
+- A3: 3-cascade sun shadow maps (1024² each, splits 22/65/230 m), bounding-sphere fit +
+  texel snapping, reversed-depth orthographic, depth-only raster mode, back-face culled
+  casters, coarser LOD for cascades 1-2, 2x2 bilinear PCF, slope-scaled bias.
+  Sun lowered to (0.62, 0.42, 0.32) for visible shadows. `--no-shadows` disables.
+  Shadow-pass time is in the `shadow` column (includes its own vertex/setup/raster).
 
 ## Done
 - Session 1: tiled AVX2 rasterizer, half/checker/reuse tricks, benchmark harness.
 - A1: `--fast`.
 - A2: textures (2048², mips, bilinear, SIMD sampling).
+- A3: sun + 3-cascade shadow maps.
 
 ## Next
-- A3 sun light with 3-cascade shadow map.
+- A4 1M triangles, frustum culling, 3 LODs.
