@@ -29,6 +29,7 @@ struct Object {
   float radius = 0;
   int lodCount = 1;
   LodRange lod[3];
+  float lodEdge[3] = {0, 0, 0};  // typical triangle edge length (world units) per LOD
 };
 
 struct Material {
@@ -65,7 +66,10 @@ struct CullStats {
   int objectsVisible = 0;
   size_t triangles = 0;
 };
-CullStats buildDrawList(const Scene& s, const Mat4& viewProj, Vec3 lodEye, bool cullNearFar, int lodBias,
-                        std::vector<DrawItem>& out);
+// LOD: the finest level whose projected edge is >= kLodTargetPx pixels at a
+// 1080-line reference (pixelsPerUnitAt1m = 1080 / (2 tan(fovy/2))).
+constexpr float kLodTargetPx = 5.0f;
+CullStats buildDrawList(const Scene& s, const Mat4& viewProj, Vec3 lodEye, float pixelsPerUnitAt1m,
+                        bool cullNear, int lodBias, std::vector<DrawItem>& out);
 
 }  // namespace jsnow

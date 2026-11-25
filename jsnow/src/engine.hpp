@@ -26,6 +26,7 @@ struct Camera {
 };
 Camera cameraAt(int frame, float aspect);
 Vec3 sunDirection();
+float lodPixelScale(const Camera& c);
 
 class ShadowMaps;
 

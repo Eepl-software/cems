@@ -235,7 +235,10 @@ Scene buildScene(ThreadPool& pool, SceneKind kind, int texSize) {
         o.center = {mx, terrainHeight(mx, mz), mz};
         o.radius = cs * 0.75f + 8.0f;  // half diagonal + height variation
         o.lodCount = 3;
-        for (int l = 0; l < 3; ++l) o.lod[l] = addTerrainPatch(m, x0, z0, cs, cs, Q >> l, Q >> l, true);
+        for (int l = 0; l < 3; ++l) {
+          o.lod[l] = addTerrainPatch(m, x0, z0, cs, cs, Q >> l, Q >> l, true);
+          o.lodEdge[l] = cs / (Q >> l);
+        }
         s.objects.push_back(o);
       }
   }
@@ -266,6 +269,7 @@ Scene buildScene(ThreadPool& pool, SceneKind kind, int texSize) {
       o.lod[0] = addSphere(m, center, r, 24, 48, id);
       o.lod[1] = addSphere(m, center, r, 12, 24, id);
       o.lod[2] = addSphere(m, center, r, 6, 12, id);
+      for (int l = 0; l < 3; ++l) o.lodEdge[l] = 6.283f * r / (48 >> l);
     }
     s.objects.push_back(o);
   }
@@ -274,7 +278,7 @@ Scene buildScene(ThreadPool& pool, SceneKind kind, int texSize) {
   return s;
 }
 
-CullStats buildDrawList(const Scene& s, const Mat4& M, Vec3 eye, bool cullNear, int lodBias,
+CullStats buildDrawList(const Scene& s, const Mat4& M, Vec3 eye, float pxPerUnit, bool cullNear, int lodBias,
                         std::vector<DrawItem>& out) {
   out.clear();
   // Clip-space half-spaces as world planes (Gribb-Hartmann): row3 +- row0/1.
@@ -300,10 +304,11 @@ CullStats buildDrawList(const Scene& s, const Mat4& M, Vec3 eye, bool cullNear, 
     for (int p = 0; p < np && visible; ++p)
       visible = planes[p][0] * o.center.x + planes[p][1] * o.center.y + planes[p][2] * o.center.z + planes[p][3] >= -o.radius;
     if (!visible) continue;
-    const Vec3 d = o.center - eye;
-    const float dist = std::sqrt(dot(d, d));
-    const float size = dist > o.radius ? o.radius / dist : 1.0f;
-    int lod = size > 0.15f ? 0 : size > 0.05f ? 1 : 2;
+    const Vec3 dv = o.center - eye;
+    const float dist = std::sqrt(dot(dv, dv));
+    const float d = std::max(dist - o.radius, 1e-3f);  // nearest point of the bounds
+    int lod = 0;
+    while (lod + 1 < o.lodCount && o.lodEdge[lod] * pxPerUnit / d < kLodTargetPx) ++lod;
     lod = std::clamp(lod + lodBias, 0, o.lodCount - 1);
     out.push_back({o.lod[lod]});
     ++st.objectsVisible;

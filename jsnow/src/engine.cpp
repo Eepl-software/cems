@@ -23,6 +23,8 @@ std::string Options::name() const {
   return s;
 }
 
+float lodPixelScale(const Camera& c) { return 1080.0f / (2.0f * std::tan(c.fovy * 0.5f)); }
+
 Vec3 sunDirection() { return normalize(Vec3{0.62f, 0.42f, 0.32f}); }
 
 // Deterministic fly-over: 60 Hz time steps.
@@ -60,7 +62,7 @@ Engine::~Engine() = default;
 
 void Engine::renderScene(const Camera& cam, const Viewport& vp, const Target& t, StageTimes& st) {
   auto a = clk::now();
-  submitted_ = buildDrawList(scene_, cam.viewProj, cam.pos, true, 0, draws_).triangles;
+  submitted_ = buildDrawList(scene_, cam.viewProj, cam.pos, lodPixelScale(cam), true, 0, draws_).triangles;
   st.cull += ms(a, clk::now());
   if (shadows_) shadows_->update(cam, sunDirection(), st);
   PassParams pp;

@@ -108,7 +108,7 @@ void usage() {
       "  --all           all three tricks\n"
       "  --fast          half resolution + reuse (best speed/quality trade-off)\n"
       "  --no-shadows    disable the sun's cascaded shadow maps\n"
-      "  --scene S       small (100k tris, session 1) or large (1M tris, LODs)\n"
+      "  --scene S       large (default: 1M tris, 3 LODs) or small (100k, session 1)\n"
       "  --bench         run baseline, each trick, all tricks and fast; print a table\n"
       "  --bench-fast    benchmark baseline and --fast only\n"
       "  --quality       also measure PSNR against the full-quality renderer (untimed)\n"
@@ -126,7 +126,7 @@ int main(int argc, char** argv) {
   Options o;
   bool bench = false, benchFast = false, quality = false;
   int frames = 300, threads = int(std::thread::hardware_concurrency()), pngFrame = 150, texSize = 2048;
-  SceneKind kind = SceneKind::Small;
+  SceneKind kind = SceneKind::Large;
   std::string png = "jsnow.png";
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
