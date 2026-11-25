@@ -4,6 +4,14 @@
 > transparency, bloom, TAA, meshlets, HiZ, LOD streaming, and a Vulkan ICD running vkcube and
 > 30/31 Vulkan examples) is documented in `PROGRESS.md` and summarised in `FINAL_REPORT.md`.
 > Default scene is now `--scene huge`; the numbers below are session 1's.
+>
+> Session 3 (Phase F): the Vulkan driver gained compute shaders and a SPIR-V → native SIMD
+> compiler, and runs **vkQuake** (free LibreQuake data) on the CPU: `timedemo demo1` at
+> 15.0 FPS (1280x720), 24.2 FPS (720p, half-res + upscale), 8.1 / 15.9 FPS at 1080p on a
+> 4-core VM. See `PROGRESS.md` (Phase F) and `FINAL_REPORT.md` §5.
+>
+> **Apple Silicon:** `tools/bench_mac.sh` builds the NEON renderer with the Xcode command
+> line tools only and prints the same results tables (`--quick` for a short run).
 
 An experiment in how fast pure-CPU rasterization can go. C++20, CMake, no GPU,
 no window: frames are rendered into memory and one frame is saved as a PNG.

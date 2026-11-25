@@ -10,9 +10,20 @@ PSNR is always against the *current* baseline renderer of that step.
 ```
 cd jsnow && cmake -S . -B build && cmake --build build -j
 ./build/jsnow --bench-fast --quality --png ""
+# Vulkan driver + vkQuake (Phase F): Xvfb :99 &; export DISPLAY=:99
+tools/vkquake_timedemo.sh <game-dir> 1280 720 normal|fast   # game-dir: ./vkq + ./id1 (LibreQuake)
+tools/run_vk_examples.sh <SaschaWillems-Vulkan-repo> <out-dir> triangle texture ...
 ```
+vkQuake setup used here: vkQuake 1.30.1 built with meson (newer tags need Vulkan headers
+1.4.341); LibreQuake data: texture WADs from `compile_wads.py`, progs with fteqcc, maps with
+ericw-tools `qbsp -transwater -splitturb` + `vis` (rewrite each map's `wad` key to short
+relative paths), run from the game dir with `-basedir .` (long paths get truncated).
+JIT env: `JSNOW_JIT=0` (interpreter), `JSNOW_JIT_VERBOSE=1`, `JSNOW_JIT_CACHE=dir`,
+`JSNOW_JIT_CXX=compiler`. Driver env added in F: `JSNOW_ICD_UPSCALE_TO=WxH`,
+`JSNOW_ICD_DEBUG_DRAWS=1`.
 Tools installed in the session (needed again in a fresh container):
 `apt-get install -y g++-aarch64-linux-gnu qemu-user vulkan-tools libvulkan-dev glslang-tools spirv-tools`
+(Phase F also: `libsdl2-dev libvorbis-dev libmad0-dev libflac-dev meson ninja-build libx11-xcb-dev xvfb valgrind`)
 
 ## Results table (one row per step)
 
@@ -328,7 +339,61 @@ half-res trick (frame reuse is not possible for an unmodified game).
 | F2d | hardware gathers in the driver build, precomputed attachment addressing, row-copy clears, vectorised mip LOD | vkQuake 720p 13.4 → 15.0 FPS; texture example 70 → 154 FPS |
 
 ### vkQuake timedemo demo1 (2917 frames, JIT driver, final build)
-VKQ_TABLE
+Wall-clock FPS from vkQuake's `timedemo` (includes game CPU work, X11 presentation and the
+upscale); stage times are the driver's own (`JSNOW_ICD_STATS`, steady state, last 100 frames).
+
+| resolution | mode | FPS | ms/frame | raster+FS | compute | setup | VS | 4x2 blocks/frame |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| 1280x720 | normal | **15.0** | 66.7 | 38-45 | 8-10 | 2.1-2.7 | 1.2-1.8 | 310-338k |
+| 1280x720 | fast (640x360 + upscale) | **24.2** | 41.3 | 15.7 | 10.4 | 2.5 | 1.7 | 96k |
+| 1920x1080 | normal | **8.1** | 123.3 | 88.5 | 10.9 | 2.2 | 1.4 | 724k |
+| 1920x1080 | fast (960x540 + upscale) | **15.9** | 62.9 | 25.8 | 10.7 | 2.3 | 1.6 | 198k |
+
+1280x720 normal over the phase: F1 interpreter VKQ_INTERP → F2b JIT 10.3 → F2c 13.4 → F2d **15.0**
+(cold shader cache costs ~0.3 FPS on the first run: each new shader takes ~0.3-1 s to compile).
+Screenshot: `docs_vkquake_jit.png` (frame 300 of demo1, 1280x720, JIT).
+
+**Playable?** At 1280x720 `fast` (24 FPS) and 1920x1080 `fast` (16 FPS) the game plays
+smoothly enough to be playable in the classic sense; 720p native (15 FPS) is borderline;
+1080p native (8 FPS) is not.
+
+### Next bottleneck
+1. **Fixed-function work per 4x2 block** (raster+FS ≈ 60 % of a 720p frame): per-lane
+   depth/stencil tests, blending for translucent surfaces (water, particles) and
+   non-8-bit targets are still scalar; the JIT shader itself is only ~6 % of the profile.
+   Fix: move the whole per-block pipeline (varyings, depth test, shader, blend, store)
+   into the generated code so one native function processes a block end to end (what
+   SwiftShader and lavapipe do), and bin by 64x64 tiles instead of horizontal bands.
+2. **Compute post-processing** (~10 ms per frame and resolution-independent in practice):
+   vkQuake's warp/palette/lightmap compute shaders go through per-texel image
+   load/store helpers. Fix: inline RGBA8 image load/store in the JIT.
+3. Shader compile latency (0.3-1 s per shader through the system C++ compiler).
+
+### Next three things blocking GTA V through DXVK
+1. **Vulkan 1.3 + the feature set DXVK requires.** DXVK 2.x refuses to start below
+   Vulkan 1.3 and needs, among others: timeline semaphores, `synchronization2`, dynamic
+   rendering, extended dynamic state, `maintenance4/5`, `robustness2` (null
+   descriptors), `VK_EXT_transform_feedback` (D3D11 stream output),
+   `VK_EXT_depth_clip_enable`, custom border colours, descriptor indexing, and the
+   D3D11 feature-level-11 device features: geometry + tessellation shaders, dual-source
+   blending, logic ops, independent blend, `fillModeNonSolid`, `multiViewport`,
+   anisotropic filtering, `textureCompressionBC`, occlusion/pipeline-statistics queries.
+   JSNOW today: Vulkan 1.1, vertex/fragment/compute only.
+2. **Missing pipeline stages and formats GTA V actually uses:** geometry and
+   tessellation shaders, transform feedback, real MSAA (GTA V's MSAA/TXAA options),
+   BC1-BC7 texture decompression (all GTA V textures are BC-compressed), sRGB
+   render-target conversion, cube/array/3D textures, texture gather/offset, all blend
+   ops, 10/11-bit and 16-bit float targets at full speed.
+3. **Throughput and shader-compile latency.** vkQuake's pixel shaders do 3 texture
+   samples and a handful of ALU ops; a GTA V frame has 10-30x more pixel-shader work,
+   several full-screen post passes and thousands of distinct pipelines. At JSNOW's
+   current ~0.5 µs per 8-pixel block per core that is an estimated 1-3 FPS on this
+   4-core VM at 720p (single digits on a 16-core desktop), and the C++-compiler JIT would
+   stall for minutes compiling shaders. Needed: in-process code generation (LLVM ORC or a
+   direct x86/ARM emitter) with an async compile queue, the fused per-block pipeline
+   above, and a much larger CPU. (Testing GTA V itself also needs Wine/Proton and a
+   licensed copy, neither of which this environment has.)
+
 
 Per-frame breakdown at 1280x720 normal (driver stats, last 100 frames): ~63 ms =
 raster+fragment ~40, compute (vkQuake's post-process / warp shaders) ~9, setup 2.6,
@@ -338,7 +403,46 @@ overdraw). Callgrind of one frame window before F2d: raster loop 26 %, texture s
 helpers ~10 %, JIT shader code only 5.8 %, attachment addressing ~7 % (fixed in F2d).
 
 ### Vulkan examples before / after (FPS, 1280x720, examples' `-b` benchmark)
-EXAMPLES_TABLE
+| example | interpreter (start of F2) | first JIT (F2) | end of Phase F | speed-up | still missing |
+|---|---:|---:|---:|---:|---|
+| triangle | 86.14 | 100.63 | 326.83 | 3.8x | – |
+| pipelines | 6.36 | 19.52 | 32.10 | 5.0x | – |
+| descriptorsets | 21.31 | 22.39 | 150.02 | 7.0x | – |
+| dynamicuniformbuffer | 8.21 | 24.85 | 61.31 | 7.5x | – |
+| pushconstants | 27.02 | 32.94 | 30.91 | 1.1x | – |
+| specializationconstants | 9.02 | 17.20 | 33.93 | 3.8x | – |
+| texture | 28.81 | 35.63 | 176.74 | 6.1x | – |
+| texturearray | 39.60 | 40.47 | 185.88 | 4.7x | – |
+| texturecubemap | 15.26 | 17.52 | 62.19 | 4.1x | – |
+| texturemipmapgen | 9.89 | 14.06 | 66.67 | 6.7x | separate images/samplers (bound per binding only) |
+| gltfloading | 11.55 | 15.16 | 19.58 | 1.7x | – |
+| gltfskinning | 50.86 | 62.09 | 187.36 | 3.7x | – |
+| gltfscenerendering | 1.18 | 1.97 | 6.98 | 5.9x | – |
+| instancing | 0.49 | 0.97 | 3.50 | 7.2x | – |
+| indirectdraw | 0.09 | 0.14 | 0.41 | 4.7x | – |
+| offscreen | 0.89 | 1.21 | 5.48 | 6.2x | – |
+| shadowmapping | 1.85 | 3.48 | 4.49 | 2.4x | – |
+| shadowmappingcascade | 0.11 | 0.13 | 0.39 | 3.5x | – |
+| deferred | 0.96 | 1.64 | 5.61 | 5.8x | – |
+| ssao | 0.20 | 0.52 | 0.89 | 4.4x | – |
+| hdr | 0.55 | 1.11 | 1.61 | 2.9x | – |
+| bloom | 1.84 | 2.54 | 15.72 | 8.6x | – |
+| multisampling | 15.03 | 20.50 | 54.61 | 3.6x | resolve attachments (single-sampled: ignored) |
+| particlesystem | 10.95 | 13.26 | 109.86 | 10.0x | primitive topology 0 |
+| computeshader | 2.71 | 7.14 | 15.28 | 5.6x | – |
+| stencilbuffer | 22.29 | 17.68 | 22.28 | 1.0x | – |
+| occlusionquery | 13.91 | 14.49 | 24.23 | 1.7x | – |
+| radialblur | 0.73 | 0.96 | 10.09 | 13.8x | – |
+| multithreading | 1.10 | 1.54 | 1.59 | 1.4x | – |
+| pbrbasic | 0.62 | 7.20 | 6.82 | 10.9x | – |
+| negativeviewportheight | 16.59 | 23.93 | 87.97 | 5.3x | – |
+| **geometric mean** | | | | **4.3x** | |
+
+31/31 run; geometric-mean speed-up 4.3x. Where the interpreter presented a frame (18 examples),
+frames were compared after each step: bit-exact or ≥ 55 dB (differences = mip/edge rounding),
+except `stencilbuffer`, which is now correct (the old driver had no stencil test and a broken
+D24 clear). `pushconstants`/`stencilbuffer`/`multithreading` are bound by presentation and
+per-draw CPU work, not shading. Full tables: `docs_vk_examples_{interp,jit,final}.md`.
 
 ## Final state (end of session 2)
 Final 6-config bench (5M scene, all features): baseline 27.1 FPS / 36.86 ms, fast 105.4 FPS /
@@ -352,6 +456,11 @@ See `FINAL_REPORT.md` for the step table, budget analysis and AAA-game assessmen
 - A3: sun + 3-cascade shadow maps.
 - A4: 1M-triangle scene, frustum culling, 3 LODs.
 - A5: NEON path (cross-compiled, functionally verified under qemu).
+- Phases B-E: see sections above and `FINAL_REPORT.md`.
+- F1 compute + subpasses; F2 SPIR-V → native SIMD compiler; F2b-F2d driver overhead,
+  stencil, depth bias, D24 clear fix; F3 vkQuake timedemo at 720p/1080p normal + fast;
+  F4 `tools/bench_mac.sh` (NEON build verified by cross-compiling + qemu here; not run on a
+  real Mac in this session).
 
 ## Next
 - **Phase B stopped after B7**: B5, B6, B7 each gained <10% (stop rule). Phase B total:
@@ -361,4 +470,9 @@ See `FINAL_REPORT.md` for the step table, budget analysis and AAA-game assessmen
   46.4 → ~35-36 ms (DB1 static shadow caching was the only big win). Remaining profile
   (callgrind, per frame): tile raster + G-buffer resolve ~55%, lighting ~12%, triangle
   setup ~11%, shadow lookups ~6%, TAA ~7%, vertex ~6%, tone map ~4%.
-- Phase E next: compute pipelines, then a SPIR-V JIT (the dominant performance blocker).
+- Phase E next: compute pipelines, then a SPIR-V JIT (the dominant performance blocker). → done in Phase F.
+- **Phase F next** (in order): fuse the whole per-block fragment pipeline (varyings, depth/
+  stencil, shader, blend, store) into the generated code and bin by tiles; inline RGBA8
+  image load/store in compute; in-process code generation instead of the system C++
+  compiler; then the Vulkan 1.3 / DXVK feature list (see "Next three things blocking GTA V").
+  Optimisation rounds in F: F2b, F2c (+30 % vkQuake), F2d (+12 %) — the stop rule was not hit.

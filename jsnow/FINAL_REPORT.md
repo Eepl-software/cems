@@ -133,3 +133,46 @@ AAA games through a CPU Vulkan driver is out of reach for RDR2 and Wukong on any
 CPU. GTA V-class games would need compute support, Vulkan 1.3, a JIT shader compiler and a
 12+ core CPU just to reach low-settings playability. The most valuable next steps are, in
 order: compute pipelines, a SPIR-V JIT, then the Vulkan 1.3 feature set DXVK needs.
+
+## 5. Session 3 (Phase F): vkQuake on CPU only
+
+Same machine (4 cores, Xeon 2.1 GHz, AVX2). Game: vkQuake 1.30.1 + LibreQuake (free data,
+maps compiled locally; fullbright because `light` needs Embree). Benchmark: vkQuake's
+`timedemo demo1` (2917 frames, level "Dismal Shores"), driver = JSNOW Vulkan ICD with the
+new SPIR-V → native SIMD compiler. `fast` = the game runs at half width and half height
+and the driver upscales each frame bilinearly to the full size (cost included).
+
+| resolution | mode | FPS | ms/frame | bottleneck (driver stats) |
+|---|---|---:|---:|---|
+| 1280x720 | normal | **15.0** | 66.7 | raster+fragment ~40 ms, compute post-processing ~9 ms |
+| 1280x720 | fast | **24.2** | 41.3 | raster+fragment 15.7, compute 10.4 |
+| 1920x1080 | normal | **8.1** | 123.3 | raster+fragment 88.5, compute 10.9 |
+| 1920x1080 | fast | **15.9** | 62.9 | raster+fragment 25.8, compute 10.7 |
+
+What it took (all in `icd/`): compute pipelines with real workgroup shared memory and
+barriers (batches run as fibers), multiple subpasses and input attachments, texel
+buffers, stencil, depth bias; a SPIR-V compiler that emits C++ over JSNOW's 8-lane SIMD
+layer (`src/simd.hpp`, so the same generator targets AVX2 and NEON), builds it with the
+system compiler and caches the shared object; then removing the driver overhead that the
+compiler exposed (per-draw allocations, per-instance passes, scalar sampling and
+addressing). It also fixed a long-standing bug: D24 depth buffers cleared to 1.0 were
+stored as 0.
+
+Vulkan examples: see `docs_vk_examples_interp.md` (interpreter), `docs_vk_examples_jit.md`
+(first JIT) and `docs_vk_examples_final.md` (end of Phase F); the table is in PROGRESS.md.
+
+**Next bottleneck:** fixed-function per-block work in the rasterizer (depth/stencil,
+blending, varyings — the generated shader itself is only ~6 % of a frame), then vkQuake's
+compute post-processing (~10 ms, scalar image load/store helpers), then shader compile
+latency (0.3-1 s per shader through the system compiler).
+
+**Next three things blocking GTA V through DXVK:**
+1. Vulkan 1.3 and DXVK's required features (timeline semaphores, sync2, dynamic rendering,
+   extended dynamic state, robustness2, transform feedback, depth-clip, descriptor
+   indexing, and D3D11 FL11 device features). JSNOW is Vulkan 1.1.
+2. Pipeline stages and formats GTA V uses: geometry + tessellation shaders, stream output,
+   real MSAA, BC1-7 texture decompression, sRGB targets, cube/3D/array textures, gather.
+3. Throughput and compile latency: ~10-30x vkQuake's per-pixel work and thousands of
+   pipelines → estimated 1-3 FPS at 720p on this VM even with everything implemented;
+   needs in-process codegen (LLVM ORC or direct emitter), a fused per-block pipeline,
+   and many more cores.
