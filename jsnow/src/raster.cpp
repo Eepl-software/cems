@@ -448,7 +448,15 @@ void Rasterizer::render(const PassParams& pp, const std::vector<DrawItem>& draws
   auto t1 = clk::now();
   pool_.run(kChunks, [&](int c, int) { setupChunk(c, pp, draws); });
   auto t2 = clk::now();
-  pool_.run(tilesX_ * tilesY_, [&](int tile, int tid) { rasterTile(tile, tid, tg, pp); });
+  // Largest tiles first: shortens the tail where some threads idle at the end.
+  const int nt = tilesX_ * tilesY_;
+  tileOrder_.resize(nt);
+  tileCost_.assign(nt, 0);
+  for (const Chunk& c : chunks_)
+    for (int t = 0; t < nt; ++t) tileCost_[t] += uint32_t(c.bins[t].size());
+  for (int t = 0; t < nt; ++t) tileOrder_[t] = t;
+  std::sort(tileOrder_.begin(), tileOrder_.end(), [&](int a, int b) { return tileCost_[a] > tileCost_[b]; });
+  pool_.run(nt, [&](int i, int tid) { rasterTile(tileOrder_[i], tid, tg, pp); });
   auto t3 = clk::now();
   binned_ = 0;
   for (auto& c : chunks_) binned_ += c.hdr.size();

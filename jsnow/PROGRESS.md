@@ -71,6 +71,7 @@ Tools installed in the session (needed again in a fresh container):
 ## Phase B optimisation rounds
 | round | change | baseline ms before → after | gain | fast ms before → after | gain |
 |---|---|---|---:|---|---:|
+| B7 | raster tiles scheduled largest-first (by binned triangle count). Kept (harmless) | 18.91 → 19.1 (2 runs: 18.87, 19.39) | 0% (<10%) | 6.48 → 6.59 | 0% |
 | B6 | skip shadow lookups for 8-px groups that are all sky or all facing away from the sun; specular masked by n·L>0 | ~20.9 → 18.91 (B5+B6 combined 21.95 → 18.91 = 14%) | ~9.6% (<10%, conservative) | 7.02 → 6.48 combined | 8% |
 | B5 | AVX2 hardware gather (`JSNOW_HW_GATHER`, CMake option, default ON; turn OFF on CPUs with the GDS/Downfall mitigation). A/B 3 runs | ~4% | <10% | – | – |
 | B4 | shadow casters one LOD coarser than the camera (c0 +1, c1/c2 +2); frame-150 PSNR vs fine casters 45.0 dB, 0.26% of pixels differ by >10/255 (shadow-edge shifts). `JSNOW_SHADOW_LOD=0` restores | 24.36 → 21.95 | 11% | 8.35 → 7.02 | 16% |
@@ -92,4 +93,8 @@ Quality pass now renders the reference every frame so its caches stay in step.
 - A5: NEON path (cross-compiled, functionally verified under qemu).
 
 ## Next
-- Phase B round 7 (stop-rule counter = 2 after B5, B6). If B7 < 10% → Phase B ends, go to Phase C.
+- **Phase B stopped after B7**: B5, B6, B7 each gained <10% (stop rule). Phase B total:
+  baseline 44.57 → 18.91 ms (2.36x), fast 13.38 → 6.48 ms (2.06x).
+  Remaining profile (baseline): tile shading ~8 ms, visibility raster ~4.5 ms, shadow passes 4.4, setup 1.7.
+- Phase C: C1 tile-deferred G-buffer + PBR + HDR + tone mapping; C2 100+ point lights with tiled
+  culling; C3 transparency; C4 bloom; C5 TAA.

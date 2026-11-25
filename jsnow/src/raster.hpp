@@ -113,6 +113,8 @@ class Rasterizer {
   std::vector<std::pair<uint32_t, uint32_t>> vblocks_;  // vertex ranges this pass
   std::vector<uint64_t> triPrefix_;                     // triangle prefix sum over draws
   std::vector<Chunk> chunks_;
+  std::vector<int> tileOrder_;
+  std::vector<uint32_t> tileCost_;
   int tilesX_ = 0, tilesY_ = 0, targetW_ = 0, targetH_ = 0;
   struct TileBuf {
     alignas(64) float depth[kTile * kTile];
