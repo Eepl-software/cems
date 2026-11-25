@@ -67,6 +67,12 @@ struct alignas(16) TriHeader {
   float x0, y0;
   int minx, miny, maxx, maxy;  // inclusive pixel bbox, clamped to target
   float pd[3];                 // depth plane z/w: value at (x0,y0), d/dx, d/dy
+  // Shaded passes: attribute planes are built lazily, per tile, only for
+  // triangles that win at least one pixel (from these vertex indices).
+  uint32_t vtx[3];   // mesh vertices in v0, v1, v2 order
+  uint32_t material;
+  int32_t attrIdx;   // >= 0: clipped triangle, planes precomputed in Chunk::attr
+  float invArea;
 };
 // Perspective-correct attribute planes: q = 1/w and attr*q.
 struct TriAttr {
@@ -85,6 +91,7 @@ class Rasterizer {
  private:
   struct SV {  // screen-space vertex
     float x, y, d, q, a[kAttrs];
+    uint32_t vid;  // mesh vertex, or UINT32_MAX for vertices created by clipping
   };
   struct alignas(64) Chunk {  // own cache line: avoids false sharing between setup threads
     std::vector<TriHeader> hdr;
@@ -96,6 +103,7 @@ class Rasterizer {
   void setupTri(Chunk& ch, const SV& a, const SV& b, const SV& c, uint32_t mat, bool shaded);
   void clipAndSetup(Chunk& ch, const uint32_t v[3], uint32_t mat, const PassParams& pp, bool shaded);
   void rasterTile(int tile, int tid, const Target& t, const PassParams& pp);
+  void buildAttr(const TriHeader& h, TriAttr& a) const;
 
   ThreadPool& pool_;
   const Scene& scene_;
@@ -109,7 +117,7 @@ class Rasterizer {
   struct TileBuf {
     alignas(64) float depth[kTile * kTile];
     alignas(64) uint32_t color[kTile * kTile];
-    alignas(64) uint32_t id[kTile * kTile];  // visibility buffer: chunk << 24 | triangle
+    alignas(64) uint32_t id[kTile * kTile];  // visibility buffer: index into the tile triangle list
   };
   std::vector<TileBuf> tileBufs_;
   // Material table in SoA form for per-lane gathers while shading.

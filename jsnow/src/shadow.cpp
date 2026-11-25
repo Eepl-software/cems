@@ -9,6 +9,14 @@ namespace jsnow {
 
 using namespace simd;
 
+namespace {
+// Casters use coarser LODs than the camera (shadow texels are larger than pixels).
+int shadowLodBias(int cascade) {
+  static const int base = [] { const char* e = std::getenv("JSNOW_SHADOW_LOD"); return e ? std::atoi(e) : 1; }();
+  return cascade == 0 ? base : base + 1;
+}
+}  // namespace
+
 ShadowMaps::ShadowMaps(ThreadPool& pool, const Scene& scene, int size)
     : pool_(pool), scene_(scene), rast_(pool, scene), S_(size), maps_(size_t(kCascades) * size * size, 0.0f) {}
 
@@ -82,7 +90,7 @@ void ShadowMaps::update(const Camera& cam, Vec3 L, StageTimes& st) {
     biasScale_[c] = texel / farZ;
 
     auto a = clk::now();
-    buildDrawList(scene_, vp, cam.pos, lodPixelScale(cam), false, c == 0 ? 0 : 1, draws_);
+    buildDrawList(scene_, vp, cam.pos, lodPixelScale(cam), false, shadowLodBias(c), draws_);
     inner.cull += std::chrono::duration<double, std::milli>(clk::now() - a).count();
     PassParams pp;
     pp.viewProj = vp;

@@ -33,6 +33,8 @@ Tools installed in the session (needed again in a fresh container):
 | B1 visibility buffer (shadow 5.4) | fast | 92.4 | 10.82 | 33.9 | 0.33 | 1.36 | 2.90 | 0.47 | – | 0.40 | shadow passes 5.4 (half the frame) |
 | B2 staggered cascades (shadow 7.4) | baseline | 41.0 | 24.36 | ref | 0.68 | 2.76 | 13.56 | – | – | – | raster 13.6 (shading) |
 | B2 staggered cascades (shadow 3.5) | fast | 120 | 8.35 | 33.9 | 0.30 | 1.23 | 2.56 | 0.44 | – | 0.37 | shadow 3.5, raster 2.6 |
+| B3+B4 lazy attrs, coarse casters (shadow 4.6) | baseline | 45.5 | 21.95 | ref | 0.68 | 1.86 | 14.75 | – | – | – | raster 14.8 (tile shading ≈ 2/3) |
+| B3+B4 lazy attrs, coarse casters (shadow 2.2) | fast | 142 | 7.02 | 33.9 | 0.30 | 0.79 | 2.94 | 0.46 | – | 0.38 | raster 2.9, shadow 2.2 |
 
 ## Decisions log
 - A1: `--fast` = half resolution + reuse (best trade-off found in session 1).
@@ -67,6 +69,8 @@ Tools installed in the session (needed again in a fresh container):
 ## Phase B optimisation rounds
 | round | change | baseline ms before → after | gain | fast ms before → after | gain |
 |---|---|---|---:|---|---:|
+| B4 | shadow casters one LOD coarser than the camera (c0 +1, c1/c2 +2); frame-150 PSNR vs fine casters 45.0 dB, 0.26% of pixels differ by >10/255 (shadow-edge shifts). `JSNOW_SHADOW_LOD=0` restores | 24.36 → 21.95 | 11% | 8.35 → 7.02 | 16% |
+| B3 | lazy attribute planes: setup builds only edges/depth + vertex ids; planes built per tile on first visible use (bit-identical). Setup 2.8 → 2.0 ms but tile raster grew by about as much | 24.36 → ~24.0 (A/B 3 runs: within noise) | ~2% (<10%) | – | – |
 | B2 | staggered shadow cascades (c0 every frame, c1 every 2nd, c2 every 4th, kept only while they still cover the slice; 15% radius margin) | 29.09 → 24.36 | 16% | 10.82 → 8.35 | 23% |
 | B1 | per-tile visibility buffer: raster writes depth + triangle id only; each tile shaded once per pixel, attributes resolved per distinct triangle per 8-px group, per-lane materials (texture array) | 44.57 → 29.09 | 35% | 13.38 → 10.82 | 19% |
 
@@ -84,4 +88,4 @@ Quality pass now renders the reference every frame so its caches stay in step.
 - A5: NEON path (cross-compiled, functionally verified under qemu).
 
 ## Next
-- Phase B round 3: baseline raster/shading 13.6 ms.
+- Phase B round 5: tile shading (~2/3 of raster 14.8 ms). Stop-rule counter: B3 <10%, B4 ≥10% → counter reset to 0.

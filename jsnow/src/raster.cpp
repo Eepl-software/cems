@@ -104,7 +104,12 @@ void Rasterizer::setupTri(Chunk& ch, const SV& va, const SV& vb, const SV& vc, u
     p[2] = (a0 * t.B[0] + a1 * t.B[1] + a2 * t.B[2]) * inv;
   };
   plane(t.pd, v0.d, v1.d, v2.d);
-  if (shaded) {
+  t.vtx[0] = v0.vid; t.vtx[1] = v1.vid; t.vtx[2] = v2.vid;
+  t.material = mat;
+  t.invArea = inv;
+  t.attrIdx = -1;
+  if (shaded && (v0.vid == UINT32_MAX || v1.vid == UINT32_MAX || v2.vid == UINT32_MAX)) {
+    t.attrIdx = int32_t(ch.attr.size());
     TriAttr& a = ch.attr.emplace_back();
     a.x0 = v0.x; a.y0 = v0.y;
     plane(a.pq, v0.q, v1.q, v2.q);
@@ -121,6 +126,24 @@ void Rasterizer::setupTri(Chunk& ch, const SV& va, const SV& vb, const SV& vc, u
   const int tx0 = minx / kTile, tx1 = maxx / kTile, ty0 = miny / kTile, ty1 = maxy / kTile;
   for (int ty = ty0; ty <= ty1; ++ty)
     for (int tx = tx0; tx <= tx1; ++tx) ch.bins[ty * tilesX_ + tx].push_back(id);
+}
+
+// Same plane math as setupTri (bit-identical), run only for visible triangles.
+void Rasterizer::buildAttr(const TriHeader& t, TriAttr& a) const {
+  const float inv = t.invArea;
+  auto plane = [&](float* p, float a0, float a1, float a2) {
+    p[0] = a0;
+    p[1] = (a0 * t.A[0] + a1 * t.A[1] + a2 * t.A[2]) * inv;
+    p[2] = (a0 * t.B[0] + a1 * t.B[1] + a2 * t.B[2]) * inv;
+  };
+  const uint32_t* v = t.vtx;
+  const float q0 = iw_[v[0]], q1 = iw_[v[1]], q2 = iw_[v[2]];
+  a.x0 = t.x0; a.y0 = t.y0;
+  plane(a.pq, q0, q1, q2);
+  const float* src[kAttrs] = {mesh_.tu.data(), mesh_.tv.data(), mesh_.nx.data(), mesh_.ny.data(),
+                              mesh_.nz.data(), mesh_.px.data(), mesh_.py.data(), mesh_.pz.data()};
+  for (int k = 0; k < kAttrs; ++k) plane(a.pa[k], src[k][v[0]] * q0, src[k][v[1]] * q1, src[k][v[2]] * q2);
+  a.material = t.material;
 }
 
 void Rasterizer::clipAndSetup(Chunk& ch, const uint32_t vi_[3], uint32_t mat, const PassParams& pp, bool shaded) {
@@ -174,6 +197,7 @@ void Rasterizer::clipAndSetup(Chunk& ch, const uint32_t vi_[3], uint32_t mat, co
     sv[k].y = snap(in[k].y * iw * pp.vp.ay + pp.vp.by);
     sv[k].d = in[k].z * iw;
     sv[k].q = iw;
+    sv[k].vid = UINT32_MAX;
     for (int j = 0; j < kAttrs; ++j) sv[k].a[j] = in[k].a[j];
   }
   for (int k = 1; k + 1 < n; ++k) setupTri(ch, sv[0], sv[k], sv[k + 1], mat, shaded);
@@ -212,11 +236,7 @@ void Rasterizer::setupChunk(int c, const PassParams& pp, const std::vector<DrawI
       for (int k = 0; k < 3; ++k) {
         const uint32_t i = v[k];
         s[k].x = sx[i]; s[k].y = sy[i]; s[k].d = sd_[i]; s[k].q = iw_[i];
-        if (shaded) {
-          s[k].a[0] = mesh_.tu[i]; s[k].a[1] = mesh_.tv[i];
-          s[k].a[2] = mesh_.nx[i]; s[k].a[3] = mesh_.ny[i]; s[k].a[4] = mesh_.nz[i];
-          s[k].a[5] = mesh_.px[i]; s[k].a[6] = mesh_.py[i]; s[k].a[7] = mesh_.pz[i];
-        }
+        s[k].vid = i;  // attributes are fetched lazily at shading time
       }
       setupTri(ch, s[0], s[1], s[2], mat, shaded);
     }
@@ -344,18 +364,37 @@ void Rasterizer::rasterTile(int tile, int tid, const Target& tg, const PassParam
   std::fill(std::begin(tb.depth), std::end(tb.depth), 0.0f);
   if (shaded) std::fill(std::begin(tb.id), std::end(tb.id), 0xFFFFFFFFu);
   const int tileX = (tile % tilesX_) * kTile, tileY = (tile / tilesX_) * kTile;
+  // Shaded: the visibility buffer stores an index into this tile's triangle list.
+  static thread_local std::vector<const TriHeader*> list;
+  static thread_local std::vector<const TriAttr*> listAttr;
+  static thread_local std::vector<TriAttr> cache;
+  static thread_local std::vector<uint8_t> done;
+  list.clear();
+  listAttr.clear();
   for (size_t c = 0; c < chunks_.size(); ++c) {
     const Chunk& ch = chunks_[c];
     for (uint32_t id : ch.bins[tile]) {
-      if (shaded) drawTri<true>(ch.hdr[id], uint32_t(c << 24) | id, tb.depth, tb.id, tileX, tileY);
-      else drawTri<false>(ch.hdr[id], 0, tb.depth, nullptr, tileX, tileY);
+      const TriHeader& h = ch.hdr[id];
+      if (shaded) {
+        drawTri<true>(h, uint32_t(list.size()), tb.depth, tb.id, tileX, tileY);
+        list.push_back(&h);
+        listAttr.push_back(h.attrIdx >= 0 ? &ch.attr[h.attrIdx] : nullptr);
+      } else {
+        drawTri<false>(h, 0, tb.depth, nullptr, tileX, tileY);
+      }
     }
   }
   const int w = std::min(kTile, tg.w - tileX), h = std::min(kTile, tg.h - tileY);
   if (shaded) {
     const ShadeCtx s{{pp.sunDir.x, pp.sunDir.y, pp.sunDir.z}, {pp.camPos.x, pp.camPos.y, pp.camPos.z}, pp.shadow,
                      &scene_.textures, matLayer_.data(), matR_.data(), matG_.data(), matB_.data(), matSpec_.data()};
-    auto attrOf = [&](uint32_t id) -> const TriAttr& { return chunks_[id >> 24].attr[id & 0xFFFFFF]; };
+    if (cache.size() < list.size()) cache.resize(list.size());
+    done.assign(list.size(), 0);
+    auto attrOf = [&](uint32_t k) -> const TriAttr& {
+      if (listAttr[k]) return *listAttr[k];
+      if (!done[k]) { buildAttr(*list[k], cache[k]); done[k] = 1; }
+      return cache[k];
+    };
     for (int y = 0; y < h; ++y) {
       const vf py = set1(float(tileY + y) + 0.5f);
       for (int gx = 0; gx < w; gx += 8) {
