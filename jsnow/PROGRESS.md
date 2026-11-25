@@ -306,6 +306,40 @@ gltfloading 4.0→9.1 FPS, pushconstants 8.6→23.2, pbrbasic 0.25→0.54, multi
 
 
 
+## Phase F: vkQuake on CPU only (session 3)
+
+Milestone: vkQuake 1.30.1 playable on the JSNOW Vulkan driver, no GPU.
+Free game data: LibreQuake (maps compiled locally with ericw-tools qbsp + vis; `light`
+needs Embree, which is unavailable, so maps are fullbright; the world shader still
+samples a lightmap texture, so the per-pixel cost is the same as a lit map).
+Benchmark = vkQuake's own `timedemo demo1` (LibreQuake demo on `lq_e1m4` "Dismal
+Shores", 2917 frames): `tools/vkquake_timedemo.sh <game-dir> W H normal|fast`.
+`fast` = vkQuake's `r_scale 2` (3D view at half resolution, upscaled by vkQuake's own
+compute shader; HUD at full resolution) — the generic equivalent of JSNOW's `--fast`
+half-res trick (frame reuse is not possible for an unmodified game).
+
+### Steps
+| step | what | result |
+|---|---|---|
+| F1 | compute pipelines (dispatch, workgroup builtins, storage buffers/images, atomics, texel buffers), multiple subpasses + input attachments | `computeshader` example runs (31/31); vkQuake starts and renders a full level (interpreter, ~2.3 FPS @720p on `lq_e1m1`) |
+| F2 | SPIR-V → native SIMD compiler (`icd/jit.cpp`): SPIR-V is translated to C++ over `src/simd.hpp` (8 lanes = one 4x2 pixel block or 8 vertices/invocations), compiled by the system C++ compiler (`-O2 -mavx2 -mfma`, NEON on arm64), cached on disk (`~/.cache/jsnow-jit/<hash>.so`) and `dlopen`ed. Structured control flow with execution masks (if/else both sides under masks, loops run while any lane is active, switch, early return, kill, inlined calls, phi parallel copies). Unsupported shaders fall back to the interpreter. | 31 examples bit-exact or ≥ 68 dB vs the interpreter; pbrbasic 0.62 → 7.2 FPS (11.5x), ssao 2.6x, computeshader 2.6x; most others 1.1-2x because time moved to the driver |
+| F2b | driver overhead: per-thread cached shader invocations, instanced draws in one pass, triangle binning to bands, tiny-triangle rejection, SIMD edge functions/varyings, vertex-input plan, 4-channel RGBA8 sampling; compute shared memory + barriers (workgroup batches run as fibers that switch at `barrier()`); SIMD `exp2/log2/pow/sin/cos` (≤ 1.5e-7 error) | instancing 0.97 → 3.6 FPS, indirectdraw 0.14 → 0.39, vkcube 216 → 254 |
+| F2c | stencil test, depth bias (static + dynamic), SIMD bilinear RGBA8/BGRA8 sampler (gathers), packed 8-bit colour writes; **bug fix: D24 depth cleared to 1.0 was stored as 0** (`1.0f*16777215+0.5f` rounds to 2^24 in float) — every D24S8 app failed depth tests against the clear value | vkQuake 720p timedemo 10.3 → 13.4 FPS; stencilbuffer correct for the first time |
+| F2d | hardware gathers in the driver build, precomputed attachment addressing, row-copy clears, vectorised mip LOD | vkQuake 720p 13.4 → 15.0 FPS; texture example 70 → 154 FPS |
+
+### vkQuake timedemo demo1 (2917 frames, JIT driver, final build)
+VKQ_TABLE
+
+Per-frame breakdown at 1280x720 normal (driver stats, last 100 frames): ~63 ms =
+raster+fragment ~40, compute (vkQuake's post-process / warp shaders) ~9, setup 2.6,
+vertex 1.7, other (clears, copies, present) ~9. ~310k 4x2 blocks per frame (≈2.7x
+overdraw). Callgrind of one frame window before F2d: raster loop 26 %, texture sampling
+18 % (of which scalar `log2f` for LOD 5.6 %, now vectorised), compute image load/store
+helpers ~10 %, JIT shader code only 5.8 %, attachment addressing ~7 % (fixed in F2d).
+
+### Vulkan examples before / after (FPS, 1280x720, examples' `-b` benchmark)
+EXAMPLES_TABLE
+
 ## Final state (end of session 2)
 Final 6-config bench (5M scene, all features): baseline 27.1 FPS / 36.86 ms, fast 105.4 FPS /
 9.49 ms (29.0 dB), half 53.6, checker 59.1 (21.9 dB), reuse 40.6, all 69.9.

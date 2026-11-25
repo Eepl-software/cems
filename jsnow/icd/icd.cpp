@@ -1008,6 +1008,48 @@ void clearAttachment(ImageView* v, const VkClearValue& cv, const VkRect2D& r, in
 }
 
 // ----------------------------------------------------------- present (xcb)
+// JSNOW_ICD_UPSCALE_TO=WxH: present() upscales each swapchain image bilinearly to WxH
+// (JSNOW's half-resolution trick for an unmodified game: run the game at half size and
+// let the driver upscale; the upscale cost is part of every frame).
+bool upscaleTarget(uint32_t& w, uint32_t& h) {
+  static uint32_t tw = 0, th = 0;
+  static const bool on = [] {
+    const char* e = std::getenv("JSNOW_ICD_UPSCALE_TO");
+    return e && std::sscanf(e, "%ux%u", &tw, &th) == 2 && tw && th;
+  }();
+  w = tw; h = th;
+  return on;
+}
+
+// Bilinear upscale of a 4-byte-per-pixel image (8.8 fixed point), rows split over threads.
+void upscale(const uint8_t* src, uint32_t sw, uint32_t sh, size_t spitch, uint8_t* dst, uint32_t dw, uint32_t dh) {
+  auto rows = [&](uint32_t y0, uint32_t y1) {
+    for (uint32_t y = y0; y < y1; ++y) {
+      const float fy = std::max(0.0f, (y + 0.5f) * sh / dh - 0.5f);
+      const uint32_t ya = std::min(uint32_t(fy), sh - 1), yb = std::min(ya + 1, sh - 1);
+      const uint32_t wy = uint32_t((fy - float(ya)) * 256.0f);
+      const uint8_t* ra = src + ya * spitch;
+      const uint8_t* rb = src + yb * spitch;
+      uint8_t* o = dst + size_t(y) * dw * 4;
+      for (uint32_t x = 0; x < dw; ++x) {
+        const float fx = std::max(0.0f, (x + 0.5f) * sw / dw - 0.5f);
+        const uint32_t xa = std::min(uint32_t(fx), sw - 1), xb = std::min(xa + 1, sw - 1);
+        const uint32_t wx = uint32_t((fx - float(xa)) * 256.0f);
+        for (int c = 0; c < 4; ++c) {
+          const uint32_t t = ra[xa * 4 + c] * (256 - wx) + ra[xb * 4 + c] * wx;
+          const uint32_t b = rb[xa * 4 + c] * (256 - wx) + rb[xb * 4 + c] * wx;
+          o[x * 4 + c] = uint8_t((t * (256 - wy) + b * wy + 32768) >> 16);
+        }
+      }
+    }
+  };
+  const uint32_t n = std::max(1u, std::min(8u, std::thread::hardware_concurrency()));
+  std::vector<std::thread> th;
+  for (uint32_t i = 1; i < n; ++i) th.emplace_back(rows, dh * i / n, dh * (i + 1) / n);
+  rows(0, dh / n);
+  for (auto& t : th) t.join();
+}
+
 void present(Swapchain* sc, Image* im) {
   static const bool skip = std::getenv("JSNOW_ICD_NO_PRESENT") != nullptr;
   ++sc->presented;
@@ -1047,13 +1089,32 @@ void present(Swapchain* sc, Image* im) {
   xcb_get_geometry_reply_t* g = xcb_get_geometry_reply(conn, xcb_get_geometry(conn, sc->surf->window), nullptr);
   const uint8_t depth = g ? g->depth : 24;
   free(g);
+  uint32_t outW = im->w, outH = im->h;
+  const uint8_t* pixels = im->at(0, 0, 0, 0);
+  size_t pitch = size_t(im->at(0, 0, 0, im->h > 1 ? 1 : 0) - pixels);
+  if (pitch == 0) pitch = size_t(im->w) * 4;
+  static thread_local std::vector<uint8_t> scaled;
+  uint32_t tw, th;
+  if (upscaleTarget(tw, th) && (tw != im->w || th != im->h)) {
+    outW = tw; outH = th;
+    scaled.resize(size_t(outW) * outH * 4);
+    upscale(pixels, im->w, im->h, pitch, scaled.data(), outW, outH);
+    pixels = scaled.data();
+    pitch = size_t(outW) * 4;
+  }
   const uint32_t maxReq = xcb_get_maximum_request_length(conn) * 4;
-  const uint32_t rowBytes = im->w * 4;
+  const uint32_t rowBytes = outW * 4;
   const uint32_t rowsPer = std::max(1u, (maxReq - 64) / rowBytes);
-  for (uint32_t y = 0; y < im->h; y += rowsPer) {
-    const uint32_t rows = std::min(rowsPer, im->h - y);
-    xcb_put_image(conn, XCB_IMAGE_FORMAT_Z_PIXMAP, sc->surf->window, sc->gc, uint16_t(im->w), uint16_t(rows), 0,
-                  int16_t(y), 0, depth, rows * rowBytes, im->at(0, 0, 0, y));
+  for (uint32_t y = 0; y < outH; y += rowsPer) {
+    const uint32_t rows = std::min(rowsPer, outH - y);
+    if (pitch == rowBytes) {
+      xcb_put_image(conn, XCB_IMAGE_FORMAT_Z_PIXMAP, sc->surf->window, sc->gc, uint16_t(outW), uint16_t(rows), 0,
+                    int16_t(y), 0, depth, rows * rowBytes, pixels + size_t(y) * pitch);
+    } else {
+      for (uint32_t r = 0; r < rows; ++r)
+        xcb_put_image(conn, XCB_IMAGE_FORMAT_Z_PIXMAP, sc->surf->window, sc->gc, uint16_t(outW), 1, 0, int16_t(y + r), 0,
+                      depth, rowBytes, pixels + size_t(y + r) * pitch);
+    }
   }
   xcb_flush(conn);
 }
