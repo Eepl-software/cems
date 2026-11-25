@@ -768,6 +768,20 @@ void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t firstIn
         (const void*)&P, P.stencilTest, P.depthTest, int(P.depthOp), (unsigned long long)c, (unsigned long long)p); } }
     dbgPrint{dbgDraw, dbgCover, dbgPass, P};
   const bool stencilOn = P.stencilTest && depthView && stencilPtr(depthView->format, depthView->img->at(0, 0, 0, 0));
+  // Per-draw addressing (Image::at() per lane was ~7% of a vkQuake frame).
+  uint8_t* const dBase = depthView ? depthView->img->at(0, depthView->baseLayer, 0, 0) : nullptr;
+  const size_t dPitch = depthView ? size_t(depthView->img->at(0, depthView->baseLayer, 0, 1) - dBase) : 0;
+  const size_t dBpp = depthView ? depthView->img->bpp : 0;
+  auto dAt = [&](int X, int Y) { return dBase + size_t(Y) * dPitch + size_t(X) * dBpp; };
+  uint8_t* cBase[8] = {}; size_t cPitch[8] = {}, cBpp[8] = {};
+  for (size_t oi = 0; oi < fsOut.size() && oi < 8; ++oi) {
+    const auto& fo = fsOut[oi];
+    if (fo.first < 0 || size_t(fo.first) >= sp.color.size() || sp.color[fo.first] == VK_ATTACHMENT_UNUSED) continue;
+    ImageView* cv = ex.fb->views[sp.color[fo.first]];
+    cBase[oi] = cv->img->at(cv->baseLevel, cv->baseLayer, 0, 0);
+    cPitch[oi] = size_t(cv->img->at(cv->baseLevel, cv->baseLayer, 0, 1) - cBase[oi]);
+    cBpp[oi] = cv->img->bpp;
+  }
   const int bands = std::max(1, std::min(ex.dev->pool->size() * 4, (y1 - y0 + 7) / 8));
   // Bin triangles into bands (order preserved within a band).
   std::vector<uint32_t> binStart(size_t(bands) + 1, 0), binIdx;
@@ -856,7 +870,7 @@ void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t firstIn
           if (stencilOn)
             for (int l = 0; l < 8; ++l)
               if (pass & (1 << l)) {
-                uint8_t* spp = stencilPtr(depthView->format, depthView->img->at(0, depthView->baseLayer, x + (l & 3), y + (l >> 2)));
+                uint8_t* spp = stencilPtr(depthView->format, dAt(x + (l & 3), y + (l >> 2)));
                 if (!depthPass(sf.compareOp, float(stRef & stCmp), float(*spp & stCmp))) {
                   *spp = uint8_t((*spp & ~stWm) | (stencilOp(sf.failOp, *spp, uint8_t(stRef)) & stWm));
                   pass &= uint8_t(~(1 << l));
@@ -865,7 +879,7 @@ void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t firstIn
           if (depthView && P.depthTest)
             for (int l = 0; l < 8; ++l)
               if (pass & (1 << l)) {
-                uint8_t* dp = depthView->img->at(0, depthView->baseLayer, x + (l & 3), y + (l >> 2));
+                uint8_t* dp = dAt(x + (l & 3), y + (l >> 2));
                 if (!depthPass(P.depthOp, z[l], readDepth(depthView->format, dp))) {
                   if (dbgDraw) { static std::atomic<int> once{0}; if (once++ < 3) std::fprintf(stderr, "[jsnow-draw] depth fail z %g d %g fmt %d\n", z[l], readDepth(depthView->format, dp), int(depthView->format)); }
                   pass &= uint8_t(~(1 << l));
@@ -924,9 +938,9 @@ void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t firstIn
             if (!(pass & (1 << l))) continue;
             const int X = x + (l & 3), Y = y + (l >> 2);
             if (depthView && P.depthWrite)
-              writeDepth(depthView->format, depthView->img->at(0, depthView->baseLayer, X, Y), z[l]);
+              writeDepth(depthView->format, dAt(X, Y), z[l]);
             if (stencilOn) {
-              uint8_t* spp = stencilPtr(depthView->format, depthView->img->at(0, depthView->baseLayer, X, Y));
+              uint8_t* spp = stencilPtr(depthView->format, dAt(X, Y));
               *spp = uint8_t((*spp & ~stWm) | (stencilOp(sf.passOp, *spp, uint8_t(stRef)) & stWm));
             }
             for (size_t oi = 0; oi < fsOut.size(); ++oi) {  // one output per colour attachment (by location)
@@ -934,13 +948,13 @@ void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t firstIn
               if (fo.first < 0 || size_t(fo.first) >= sp.color.size() || sp.color[fo.first] == VK_ATTACHMENT_UNUSED) continue;
               ImageView* cv = ex.fb->views[sp.color[fo.first]];
               if (oi < 4 && outFast[oi]) {
-                std::memcpy(cv->img->at(cv->baseLevel, cv->baseLayer, X, Y), &packed[oi][l], 4);
+                std::memcpy(cBase[oi] + size_t(Y) * cPitch[oi] + size_t(X) * 4, &packed[oi][l], 4);
                 continue;
               }
               const uint32_t nc = fs.types[fs.vars[fo.second].type].comps;
               float c[4] = {0, 0, 0, 1};
               for (uint32_t ch = 0; ch < std::min(nc, 4u); ++ch) c[ch] = inv.output(fo.second)[ch * 8 + l];
-              uint8_t* cp = cv->img->at(cv->baseLevel, cv->baseLayer, X, Y);
+              uint8_t* cp = oi < 8 ? cBase[oi] + size_t(Y) * cPitch[oi] + size_t(X) * cBpp[oi] : cv->img->at(cv->baseLevel, cv->baseLayer, X, Y);
               const VkPipelineColorBlendAttachmentState* bs =
                   size_t(fo.first) < P.blends.size() ? &P.blends[fo.first] : nullptr;
               float d[4];
@@ -968,6 +982,20 @@ void drawPrimitives(Exec& ex, const std::vector<uint32_t>& ids, uint32_t firstIn
 
 void clearAttachment(ImageView* v, const VkClearValue& cv, const VkRect2D& r, int aspects = 3) {
   Image* im = v->img;
+  const bool whole = !isDepth(v->format) || aspects == 3 || !stencilPtr(v->format, im->at(0, 0, 0, 0));
+  if (whole && r.extent.height > 1 && r.offset.y < int32_t(im->h)) {
+    // Fill the first row, then copy it (the per-pixel path below is only for partial depth/stencil).
+    VkRect2D row = r;
+    row.extent.height = 1;
+    clearAttachment(v, cv, row, aspects);
+    const uint32_t x0 = uint32_t(std::max(0, r.offset.x)), x1 = std::min(im->w, uint32_t(r.offset.x) + r.extent.width);
+    if (x1 <= x0) return;
+    const uint8_t* src = im->at(v->baseLevel, v->baseLayer, x0, uint32_t(r.offset.y));
+    const size_t n = size_t(x1 - x0) * im->bpp;
+    for (uint32_t y = uint32_t(r.offset.y) + 1; y < uint32_t(r.offset.y) + r.extent.height && y < im->h; ++y)
+      std::memcpy(im->at(v->baseLevel, v->baseLayer, x0, y), src, n);
+    return;
+  }
   for (uint32_t y = r.offset.y; y < r.offset.y + r.extent.height && y < im->h; ++y)
     for (uint32_t x = r.offset.x; x < r.offset.x + r.extent.width && x < im->w; ++x) {
       uint8_t* p = im->at(v->baseLevel, v->baseLayer, x, y);
@@ -1640,10 +1668,6 @@ VKAPI void VKAPI_CALL jsnow_CmdBeginRenderPass(VkCommandBuffer c, const VkRender
       const int aspects = (rp->att[i].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ? 1 : 0) |
                           (depth && rp->att[i].stencilLoadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ? 2 : 0);
       if (aspects) clearAttachment(fb->views[i], clears[i], area, depth ? aspects : 1);
-      static const bool dbg = std::getenv("JSNOW_ICD_DEBUG_DRAWS") != nullptr;
-      if (dbg && depth) std::fprintf(stderr, "[jsnow-draw] clear att %zu fmt %d isDepth %d area %d,%d %ux%u img %ux%u aspects %d value %g -> reads %g\n", i,
-                                     int(fb->views[i]->format), int(isDepth(fb->views[i]->format)), area.offset.x, area.offset.y, area.extent.width, area.extent.height, fb->views[i]->img->w, fb->views[i]->img->h, aspects,
-                                     clears[i].depthStencil.depth, readDepth(fb->views[i]->format, fb->views[i]->img->at(0, 0, 10, 10)));
     }
   });
 }

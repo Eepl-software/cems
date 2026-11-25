@@ -740,9 +740,15 @@ void sample8(const Texture* tx, const uint32_t* c, const float* lod, uint32_t* o
       const int x0 = l & ~1, y0 = l & ~4;
       const float dsx = (f(c[x0 | 1]) - f(c[x0])) * tx->width, dtx = (f(c[L + (x0 | 1)]) - f(c[L + x0])) * tx->height;
       const float dsy = (f(c[y0 | 4]) - f(c[y0])) * tx->width, dty = (f(c[L + (y0 | 4)]) - f(c[L + y0])) * tx->height;
-      const float rho = std::max(dsx * dsx + dtx * dtx, dsy * dsy + dty * dty);
-      lodv[l] = 0.5f * std::log2(std::max(rho, 1e-12f));
+      lodv[l] = std::max(std::max(dsx * dsx + dtx * dtx, dsy * dsy + dty * dty), 1e-12f);  // rho^2
     }
+    // lod = 0.5 * log2(rho^2): exponent + cubic on the mantissa (|err| < 1e-3 levels).
+    using namespace jsnow::simd;
+    const vi b = as_i(loadu(lodv));
+    const vf e = to_f(shr<23>(b) & set1i(255)) - set1(127.0f);
+    const vf m = as_f((b & set1i(0x007FFFFF)) | set1i(0x3F800000)) - set1(1.0f);  // [0,1)
+    const vf p = fma(fma(set1(0.16558988f), m, set1(-0.58776924f)), m, set1(1.42349418f)) * m;
+    storeu(lodv, (e + p) * set1(0.5f));
   }
   if (tx && (tx->format == 0 || tx->format == 1)) {  // RGBA8 / BGRA8: all four channels per texel fetch
     const int sw = tx->format == 1 ? 2 : 0;          // BGRA: swap R and B
