@@ -13,7 +13,7 @@ for ex in "$@"; do
   [ -x "$bin" ] || { echo "| $ex | not built | – | – |"; continue; }
   rm -f "$OUT/$ex.missing" "$OUT/$ex.csv" "$OUT/$ex.ppm"
   ( cd "$REPO" && VK_DRIVER_FILES="$ICD" JSNOW_ICD_MISSING_LOG="$OUT/$ex.missing" \
-      JSNOW_ICD_DUMP="$OUT/$ex.ppm:10" timeout 90 "$bin" -b -bw 0 -br 4 -bf "$OUT/$ex.csv" -rp ./ \
+      JSNOW_ICD_DUMP="$OUT/$ex.ppm:${DUMPFRAME:-10}" timeout 90 "$bin" -b -bw 0 -br 4 -bf "$OUT/$ex.csv" -rp ./ \
       < /dev/null > "$OUT/$ex.log" 2>&1 )
   rc=$?
   fps=$(tail -n1 "$OUT/$ex.csv" 2>/dev/null | awk -F, '{print $5}')
