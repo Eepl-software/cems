@@ -315,7 +315,7 @@ void tonemap(ThreadPool& pool, int w, int h, const float* const hdr[3], float ex
              const Bloom* bloom, float bloomStrength) {
   using namespace simd;
   pool.run((h + 7) / 8, [&](int blk, int) {
-    static thread_local std::vector<float> brow[3];
+    static thread_local std::vector<float> brow[3], vrow;
     auto aces = [](vf x) {
       const vf num = x * fma(x, set1(2.51f), set1(0.03f));
       const vf den = fma(x, fma(x, set1(2.43f), set1(0.59f)), set1(0.14f));
@@ -325,77 +325,60 @@ void tonemap(ThreadPool& pool, int w, int h, const float* const hdr[3], float ex
     for (int y = blk * 8; y < std::min(h, blk * 8 + 8); ++y) {
       const size_t i0 = size_t(y) * w;
       const float* src[3] = {hdr[0] + i0, hdr[1] + i0, hdr[2] + i0};
-      if (bloom) {
-        // Bilinear 2x upsample of the half-resolution bloom into a row buffer.
-        const int bw = bloom->width(), bh = bloom->height();
-        const float inv = 1.0f / float(bloom->factor());
+      const bool useBloom = bloom != nullptr;
+      if (useBloom) {
+        // Bloom row at output width: vertical lerp at bloom width, then a
+        // bilinear horizontal upsample with fixed per-phase weights.
+        const int bw = bloom->width(), bh = bloom->height(), f = bloom->factor();
+        const float inv = 1.0f / float(f);
         const float fy = std::clamp((y + 0.5f) * inv - 0.5f, 0.0f, float(bh - 1));
-        // Per-column bilinear taps (same for every row of this width).
-        static thread_local std::vector<int> cx0;
-        static thread_local std::vector<float> cax;
-        static thread_local int cw = -1, cbw = -1;
-        if (cw != w || cbw != bw) {
-          cw = w; cbw = bw;
-          cx0.resize(w); cax.resize(w);
-          for (int x = 0; x < w; ++x) {
-            const float fx = std::clamp((x + 0.5f) * inv - 0.5f, 0.0f, float(bw - 1));
-            cx0[x] = std::min(int(fx), bw - 2 < 0 ? 0 : bw - 2);
-            cax[x] = bw > 1 ? fx - cx0[x] : 0.0f;
-          }
-        }
         const int by0 = int(fy), by1 = std::min(by0 + 1, bh - 1);
         const float ay = fy - by0;
-        static thread_local std::vector<float> vrow;
-        vrow.resize(bw);
+        vrow.resize(bw + 2);
         for (int c = 0; c < 3; ++c) {
-          brow[c].resize(w);
+          brow[c].resize(w + 8);
           const float* p0 = bloom->plane(c) + size_t(by0) * bw;
           const float* p1 = bloom->plane(c) + size_t(by1) * bw;
-          // Vertical lerp at bloom width, then horizontal bilinear.
-          for (int x = 0; x < bw; ++x) vrow[x] = bloomStrength * (p0[x] + ay * (p1[x] - p0[x]));
+          float* v = vrow.data() + 1;  // v[-1] and v[bw] are clamped copies
+          for (int x = 0; x < bw; ++x) v[x] = bloomStrength * (p0[x] + ay * (p1[x] - p0[x]));
+          v[-1] = v[0]; v[bw] = v[bw - 1];
           float* o = brow[c].data();
-          const float* sc = src[c];
-          const int f = bloom->factor();
-          if ((f == 4 || f == 2) && bw * f == w && bw >= 2) {
-            // Fixed bilinear weight pattern per output phase (no index arrays).
-            auto V = [&](int i) { return vrow[std::clamp(i, 0, bw - 1)]; };
-            if (f == 4) {
-              for (int i = 0; i < bw; ++i) {
-                const float l = V(i - 1), m = vrow[i], r = V(i + 1);
-                o[4 * i] = sc[4 * i] + 0.375f * l + 0.625f * m;
-                o[4 * i + 1] = sc[4 * i + 1] + 0.125f * l + 0.875f * m;
-                o[4 * i + 2] = sc[4 * i + 2] + 0.875f * m + 0.125f * r;
-                o[4 * i + 3] = sc[4 * i + 3] + 0.625f * m + 0.375f * r;
-              }
-            } else {
-              for (int i = 0; i < bw; ++i) {
-                const float l = V(i - 1), m = vrow[i], r = V(i + 1);
-                o[2 * i] = sc[2 * i] + 0.25f * l + 0.75f * m;
-                o[2 * i + 1] = sc[2 * i + 1] + 0.75f * m + 0.25f * r;
-              }
+          if (f == 4 && bw * 4 == w) {
+            for (int i = 0; i < bw; ++i) {
+              o[4 * i] = 0.375f * v[i - 1] + 0.625f * v[i];
+              o[4 * i + 1] = 0.125f * v[i - 1] + 0.875f * v[i];
+              o[4 * i + 2] = 0.875f * v[i] + 0.125f * v[i + 1];
+              o[4 * i + 3] = 0.625f * v[i] + 0.375f * v[i + 1];
+            }
+          } else if (f == 2 && bw * 2 == w) {
+            for (int i = 0; i < bw; ++i) {
+              o[2 * i] = 0.25f * v[i - 1] + 0.75f * v[i];
+              o[2 * i + 1] = 0.75f * v[i] + 0.25f * v[i + 1];
             }
           } else {
-            vrow.push_back(vrow.back());  // guard for the x0+1 tap
             for (int x = 0; x < w; ++x) {
-              const float a0 = vrow[cx0[x]], a1 = vrow[cx0[x] + 1];
-              o[x] = sc[x] + a0 + cax[x] * (a1 - a0);
+              const float fx = std::clamp((x + 0.5f) * inv - 0.5f, 0.0f, float(bw - 1));
+              const int x0 = int(fx);
+              o[x] = v[x0] + (fx - x0) * (v[x0 + 1] - v[x0]);
             }
-            vrow.pop_back();
           }
-          src[c] = brow[c].data();
         }
       }
       int x = 0;
       for (; x + 8 <= w; x += 8) {
-        const vi r = trunc_i(fma(sqrt(aces(loadu(src[0] + x) * e)), k, half));
-        const vi g = trunc_i(fma(sqrt(aces(loadu(src[1] + x) * e)), k, half));
-        const vi bb = trunc_i(fma(sqrt(aces(loadu(src[2] + x) * e)), k, half));
-        storeui(out + i0 + x, r | shl<8>(g) | shl<16>(bb) | set1i(int32_t(0xFF000000u)));
+        vf r = loadu(src[0] + x), g = loadu(src[1] + x), bb = loadu(src[2] + x);
+        if (useBloom) {
+          r = r + loadu(brow[0].data() + x); g = g + loadu(brow[1].data() + x); bb = bb + loadu(brow[2].data() + x);
+        }
+        const vi ri = trunc_i(fma(sqrt(aces(r * e)), k, half));
+        const vi gi = trunc_i(fma(sqrt(aces(g * e)), k, half));
+        const vi bi = trunc_i(fma(sqrt(aces(bb * e)), k, half));
+        storeui(out + i0 + x, ri | shl<8>(gi) | shl<16>(bi) | set1i(int32_t(0xFF000000u)));
       }
       for (; x < w; ++x) {
         uint32_t px = 0xFF000000u;
         for (int c = 0; c < 3; ++c) {
-          const float v = src[c][x] * exposure;
+          const float v = (src[c][x] + (useBloom ? brow[c][x] : 0.0f)) * exposure;
           const float t = std::clamp(v * (2.51f * v + 0.03f) / (v * (2.43f * v + 0.59f) + 0.14f), 0.0f, 1.0f);
           px |= uint32_t(std::sqrt(t) * 255.0f + 0.5f) << (8 * c);
         }

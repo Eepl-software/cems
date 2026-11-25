@@ -207,6 +207,7 @@ Feature costs measured by switching each off (baseline, 100 frames, before DB1):
 
 | round | change | baseline ms before → after | gain | fast ms before → after | gain |
 |---|---|---|---:|---|---:|
+| DB2 | bloom: SIMD fused bright pass (column sums over f rows, 8 lanes), tone-map computes only the bloom row and adds it in the SIMD loop. Bloom ~3 → ~1.7 ms | 36.14 → ~35.1 (2 runs 34.9/35.7 vs 36.1) | ~3% (<10%) | – | – |
 | DB1 | static shadow caching: scene and sun are static, so a cascade is re-rendered only when its cached map stops covering the current frustum slice (c0 margin 12%, c1/c2 15%) instead of on a schedule. Frame 120/149 vs always-updated maps: 94.8/95.0 dB. Dynamic objects would need invalidation (not modelled). `JSNOW_SHADOW_STAGGER=1` restores B2 | 46.41 → 36.14 | 22% | 13.96 → 10.08 | 28% |
 
 ## Done
@@ -221,4 +222,4 @@ Feature costs measured by switching each off (baseline, 100 frames, before DB1):
 - **Phase B stopped after B7**: B5, B6, B7 each gained <10% (stop rule). Phase B total:
   baseline 44.57 → 18.91 ms (2.36x), fast 13.38 → 6.48 ms (2.06x).
   Remaining profile (baseline): tile shading ~8 ms, visibility raster ~4.5 ms, shadow passes 4.4, setup 1.7.
-- Phase D-B round 2: post (TAA ~3.3 ms, bloom ~3 ms incl. fused bright pass) or tile shading.
+- Phase D-B round 3 (counter 1 after DB2): profile tile shading on the 5M scene.
