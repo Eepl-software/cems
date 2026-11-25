@@ -18,7 +18,7 @@ namespace jsnow {
 class Reprojector {
  public:
   void run(ThreadPool& pool, int w, int h, const uint32_t* prevColor, const float* prevDepth,
-           const Mat4& prevInvView, const Mat4& curViewProj, float p00, float p11,
+           const Mat4& prevInvView, const Mat4& curViewProj, float p00, float p11, float depthScale,
            uint32_t* outColor, float* outDepth);
   // 1 where the history sample passed the motion-vector consistency check.
   const uint8_t* valid() const { return valid_.data(); }

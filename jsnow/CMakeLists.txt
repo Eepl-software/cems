@@ -13,6 +13,8 @@ option(JSNOW_NATIVE "Compile for the host CPU (-march=native) instead of plain A
 
 add_executable(jsnow
   src/main.cpp
+  src/engine.cpp
+  src/texture.cpp
   src/scene.cpp
   src/raster.cpp
   src/post.cpp

@@ -34,7 +34,7 @@ inline int blocks(int rows) { return (rows + kRowBlock - 1) / kRowBlock; }
 }  // namespace
 
 void Reprojector::run(ThreadPool& pool, int w, int h, const uint32_t* prevColor, const float* prevDepth,
-                      const Mat4& prevInvView, const Mat4& curViewProj, float p00, float p11,
+                      const Mat4& prevInvView, const Mat4& curViewProj, float p00, float p11, float depthScale,
                       uint32_t* outColor, float* outDepth) {
   if (valid_.size() != size_t(w) * h) valid_.resize(size_t(w) * h);
   const Mat4 M = curViewProj * prevInvView;
@@ -49,7 +49,7 @@ void Reprojector::run(ThreadPool& pool, int w, int h, const uint32_t* prevColor,
     const int row = r == 3 ? 12 : r * 4;
     Ax[r] = M.m[row] * kx;
     Ay[r] = M.m[row + 1] * ky;
-    Ad[r] = M.m[row + 3];
+    Ad[r] = M.m[row + 3] / depthScale;  // stored depth = depthScale / w
     A0[r] = M.m[row] * bxv + M.m[row + 1] * byv - M.m[row + 2];
   }
   const float hw = 0.5f * w, hh = 0.5f * h;

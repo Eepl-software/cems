@@ -21,14 +21,25 @@ Tools installed in the session (needed again in a fresh container):
 | 0 (session 1) | baseline | 171 | 5.85 | ref | 0.24 | 0.85 | 4.76 | – | – | – | raster/shading |
 | A1 --fast | baseline | 186 | 5.38 | ref | 0.20 | 0.77 | 4.41 | – | – | – | raster/shading |
 | A1 --fast | fast | 475 | 2.10 | 33.8 | 0.10 | 0.34 | 0.87 | 0.44 | – | 0.35 | raster ≈ reproject+upscale |
+| A2 textures | baseline | 92 | 10.91 | ref | 0.18 | 0.85 | 9.87 | – | – | – | raster: texture sampling + per-pixel attrs |
+| A2 textures | fast | 306 | 3.27 | 32.9 | 0.09 | 0.39 | 2.01 | 0.44 | – | 0.33 | raster |
 
 ## Decisions log
 - A1: `--fast` = half resolution + reuse (best trade-off found in session 1).
   `--bench-fast` benchmarks baseline and fast only.
 
+- A2: SIMD wrapper `simd.hpp` (AVX2 / NEON / scalar, 8 lanes) so every kernel is written once.
+  Perspective-correct attributes (u, v, normal, world position; q = 1/w planes).
+  Textures: 4 procedural tileable 2048² RGBA8 textures, full box-filtered mip chain,
+  per-pixel LOD from analytic UV derivatives, bilinear within nearest mip
+  (GL_LINEAR_MIPMAP_NEAREST), repeat wrap, 4 lane-wise gathers per pixel.
+  Depth buffer now stores z/w = near/w (reprojection takes a depth scale).
+  Scene = objects with up to 3 LOD index ranges + per-triangle material; draw lists per pass.
+
 ## Done
 - Session 1: tiled AVX2 rasterizer, half/checker/reuse tricks, benchmark harness.
 - A1: `--fast`.
+- A2: textures (2048², mips, bilinear, SIMD sampling).
 
 ## Next
-- A2 textures (2048², mips, bilinear, SIMD sampling).
+- A3 sun light with 3-cascade shadow map.

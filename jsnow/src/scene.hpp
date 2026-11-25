@@ -1,24 +1,71 @@
 #pragma once
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "math.hpp"
+#include "texture.hpp"
+#include "threadpool.hpp"
 
 namespace jsnow {
 
-// Static indexed triangle mesh, structure-of-arrays.
+// Global vertex / index pool, structure-of-arrays.
 struct Mesh {
-  std::vector<float> px, py, pz;  // vertex positions (world)
-  std::vector<float> nx, ny, nz;  // vertex normals (world, unit length)
-  std::vector<uint32_t> idx;      // 3 indices per triangle, CCW = front
-  std::vector<float> ar, ag, ab;  // per-triangle albedo
+  std::vector<float> px, py, pz;  // positions (world)
+  std::vector<float> nx, ny, nz;  // unit normals
+  std::vector<float> tu, tv;      // texture coordinates (repeats)
+  std::vector<uint32_t> idx;      // 3 per triangle, CCW = front
+  std::vector<uint16_t> triMat;   // material per triangle
   size_t vertexCount() const { return px.size(); }
   size_t triangleCount() const { return idx.size() / 3; }
 };
 
+struct LodRange {
+  uint32_t firstIndex = 0, indexCount = 0, firstVertex = 0, vertexCount = 0;
+};
+
+struct Object {
+  Vec3 center;
+  float radius = 0;
+  int lodCount = 1;
+  LodRange lod[3];
+};
+
+struct Material {
+  int texture = 0;
+  float tint[3] = {1, 1, 1};
+  float specular = 0.3f;
+};
+
+// Something to draw this pass: a contiguous index range with its vertices.
+struct DrawItem {
+  LodRange r;
+};
+
+enum class SceneKind { Small, Large };
+
+struct Scene {
+  Mesh mesh;
+  std::vector<Object> objects;
+  std::vector<Material> materials;
+  std::vector<Texture> textures;
+  size_t fullDetailTriangles = 0;  // sum of LOD0 triangle counts
+  std::string description;
+};
+
 float terrainHeight(float x, float z);
 
-// Terrain (80,000 tris) + 50 spheres (400 tris each) = 100,000 triangles.
-Mesh buildScene();
+// Small: session-1 scene (100,000 triangles, one LOD).
+// Large: ~1,000,000 triangles at full detail, 3 LODs per object.
+Scene buildScene(ThreadPool& pool, SceneKind kind, int textureSize = 2048);
+
+// Frustum test of every object, LOD selection by projected size, draw list out.
+// Returns the number of triangles submitted.
+struct CullStats {
+  int objectsVisible = 0;
+  size_t triangles = 0;
+};
+CullStats buildDrawList(const Scene& s, const Mat4& viewProj, Vec3 lodEye, bool cullNearFar, int lodBias,
+                        std::vector<DrawItem>& out);
 
 }  // namespace jsnow

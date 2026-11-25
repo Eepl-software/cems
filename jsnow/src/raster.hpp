@@ -4,18 +4,16 @@
 
 #include "math.hpp"
 #include "scene.hpp"
+#include "simd.hpp"
 #include "threadpool.hpp"
 
 namespace jsnow {
 
 constexpr int kTile = 64;
-constexpr float kNear = 0.1f;      // near plane distance (must match the projection)
+constexpr float kNear = 0.1f;       // near plane distance (must match the projection)
 constexpr float kGuardBand = 4.0f;  // clip-space guard band, in multiples of the viewport
 
 // Maps NDC to target pixel coordinates: px = ndcX*ax + bx, py = ndcY*ay + by.
-// A plain full-frame viewport is {W/2, W/2, -H/2, H/2}; the 2x2 interleaved
-// mode uses a half-size target whose pixel centres land on one phase of the
-// full-resolution grid.
 struct Viewport {
   float ax, bx, ay, by;
   static Viewport full(int w, int h) { return {w * 0.5f, w * 0.5f, -h * 0.5f, h * 0.5f}; }
@@ -25,72 +23,88 @@ struct Viewport {
   }
 };
 
-struct FrameParams {
-  Mat4 viewProj;
-  Vec3 camPos;
-  Vec3 lightDir;  // unit vector towards the light
-  Viewport vp;
-};
-
 struct Target {
   int w = 0, h = 0;
-  uint32_t* color = nullptr;  // RGBA8, w*h
-  float* depth = nullptr;     // 1/w (0 = sky), w*h; may be null
+  uint32_t* color = nullptr;  // RGBA8, may be null (depth-only passes)
+  float* depth = nullptr;     // z/w, reversed (larger = closer, 0 = far/sky); may be null
 };
 
 struct StageTimes {
-  double vertex = 0, setup = 0, raster = 0, reproject = 0, compose = 0, upscale = 0;
+  double cull = 0, shadow = 0, vertex = 0, setup = 0, raster = 0, reproject = 0, compose = 0, upscale = 0;
   StageTimes& operator+=(const StageTimes& o) {
-    vertex += o.vertex; setup += o.setup; raster += o.raster;
+    cull += o.cull; shadow += o.shadow; vertex += o.vertex; setup += o.setup; raster += o.raster;
     reproject += o.reproject; compose += o.compose; upscale += o.upscale;
     return *this;
   }
+  double rasterTotal() const { return vertex + setup + raster; }
 };
 
-constexpr uint32_t kSkyColor = 0xFFE0B080u;  // ABGR in memory order RGBA -> (128,176,224)
+constexpr uint32_t kSkyColor = 0xFFE0B080u;  // RGBA (128,176,224)
 
-// Per-triangle setup result consumed by the tile rasterizer.
-struct alignas(32) Tri {
+// Per-pixel sun shadow lookup, implemented by the shadow module (A3).
+struct ShadowLookup {
+  virtual ~ShadowLookup() = default;
+  // Returns the lit fraction (0..1) for 8 world positions with view depth w.
+  virtual simd::vf sample(simd::vf wx, simd::vf wy, simd::vf wz, simd::vf viewW, simd::vf ndl) const = 0;
+};
+
+enum class PassMode { Shaded, DepthOnly };
+
+struct PassParams {
+  Mat4 viewProj;
+  Viewport vp;
+  PassMode mode = PassMode::Shaded;
+  Vec3 camPos;
+  Vec3 sunDir;  // unit vector towards the sun
+  const ShadowLookup* shadow = nullptr;
+};
+
+constexpr int kAttrs = 8;  // u, v, nx, ny, nz, wx, wy, wz
+
+// Edge/depth part of a set-up triangle (all that depth-only passes need).
+struct alignas(16) TriHeader {
   float A[3], B[3], C[3];  // edge functions relative to (x0, y0)
   float x0, y0;
   int minx, miny, maxx, maxy;  // inclusive pixel bbox, clamped to target
-  float pz[3];                 // 1/w plane: value at (x0,y0), d/dx, d/dy
-  float pn[3][3];              // normal planes
-  float ph[3][3];              // half-vector planes
-  float alb[3];
+  float pd[3];                 // depth plane z/w: value at (x0,y0), d/dx, d/dy
+};
+// Perspective-correct attribute planes: q = 1/w and attr*q.
+struct TriAttr {
+  float pq[3];
+  float pa[kAttrs][3];
+  uint32_t material;
 };
 
 class Rasterizer {
  public:
-  Rasterizer(ThreadPool& pool, const Mesh& mesh);
-  void render(const FrameParams& fp, const Target& t, StageTimes& times);
+  Rasterizer(ThreadPool& pool, const Scene& scene);
+  void render(const PassParams& pp, const std::vector<DrawItem>& draws, const Target& t, StageTimes& times);
   size_t lastBinnedTriangles() const { return binned_; }
 
  private:
-  struct ScreenVert {
-    float x, y, iw;
-    float n[3], h[3];
+  struct SV {  // screen-space vertex
+    float x, y, d, q, a[kAttrs];
   };
   struct alignas(64) Chunk {  // own cache line: avoids false sharing between setup threads
-    std::vector<Tri> tris;
+    std::vector<TriHeader> hdr;
+    std::vector<TriAttr> attr;
     std::vector<std::vector<uint32_t>> bins;
   };
-  void vertexStage(const FrameParams& fp);
-  void setupChunk(int c, const FrameParams& fp);
-  void setupTri(Chunk& ch, const ScreenVert& a, const ScreenVert& b, const ScreenVert& c,
-                const float alb[3]);
-  void clipAndSetup(Chunk& ch, uint32_t i0, uint32_t i1, uint32_t i2, const float alb[3],
-                    const FrameParams& fp);
-  void rasterTile(int tile, int tid, const Target& t, const FrameParams& fp);
+  void vertexStage(const PassParams& pp);
+  void setupChunk(int c, const PassParams& pp, const std::vector<DrawItem>& draws);
+  void setupTri(Chunk& ch, const SV& a, const SV& b, const SV& c, uint32_t mat, bool shaded);
+  void clipAndSetup(Chunk& ch, const uint32_t v[3], uint32_t mat, const PassParams& pp, bool shaded);
+  void rasterTile(int tile, int tid, const Target& t, const PassParams& pp);
 
   ThreadPool& pool_;
+  const Scene& scene_;
   const Mesh& mesh_;
-  // Per-frame vertex outputs (SoA).
-  std::vector<float> cx_, cy_, cw_, sx_, sy_, iw_, hx_, hy_, hz_;
+  std::vector<float> cx_, cy_, cz_, cw_, sx_, sy_, sd_, iw_;
   std::vector<uint8_t> oc_;
+  std::vector<std::pair<uint32_t, uint32_t>> vblocks_;  // vertex ranges this pass
+  std::vector<uint64_t> triPrefix_;                     // triangle prefix sum over draws
   std::vector<Chunk> chunks_;
   int tilesX_ = 0, tilesY_ = 0, targetW_ = 0, targetH_ = 0;
-  // Per-thread tile scratch buffers (color + depth).
   struct TileBuf {
     alignas(64) float depth[kTile * kTile];
     alignas(64) uint32_t color[kTile * kTile];
