@@ -177,7 +177,7 @@ uint32_t rgba(float r, float g, float b) {
 
 }  // namespace
 
-Scene buildScene(ThreadPool& pool, SceneKind kind, int texSize) {
+Scene buildScene(ThreadPool& pool, SceneKind kind, int texSize, int pointLights) {
   Scene s;
   Mesh& m = s.mesh;
   const float N = float(texSize);
@@ -275,6 +275,20 @@ Scene buildScene(ThreadPool& pool, SceneKind kind, int texSize) {
       for (int l = 0; l < 3; ++l) o.lodEdge[l] = 6.283f * r / (48 >> l);
     }
     s.objects.push_back(o);
+  }
+  // Point lights: coloured lamps hovering 1.5-3 m above the terrain.
+  std::mt19937 lightRng(4242);
+  for (int i = 0; i < pointLights; ++i) {
+    PointLight l;
+    const float x = (U(lightRng) * 2 - 1) * 70.0f, z = (U(lightRng) * 2 - 1) * 70.0f;
+    l.pos = {x, terrainHeight(x, z) + 1.5f + 1.5f * U(lightRng), z};
+    l.radius = 9.0f;
+    const float hue = U(lightRng);
+    const float k = 22.0f;
+    l.color[0] = k * (0.55f + 0.45f * std::cos(6.283f * hue));
+    l.color[1] = k * (0.55f + 0.45f * std::cos(6.283f * (hue + 0.33f)));
+    l.color[2] = k * (0.55f + 0.45f * std::cos(6.283f * (hue + 0.67f)));
+    s.lights.push_back(l);
   }
   for (const Object& o : s.objects) s.fullDetailTriangles += o.lod[0].indexCount / 3;
   s.description = large ? "large (chunked terrain + spheres, 3 LODs)" : "small (session-1 scene)";

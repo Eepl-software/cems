@@ -61,8 +61,8 @@ struct PassParams {
 };
 
 // Lighting constants (linear HDR units).
-constexpr float kSunColor[3] = {3.2f, 2.95f, 2.6f};
-constexpr float kSkyColor[3] = {0.30f, 0.45f, 0.75f};
+constexpr float kSunColor[3] = {1.6f, 1.15f, 0.75f};  // low evening sun
+constexpr float kSkyColor[3] = {0.10f, 0.14f, 0.26f};  // dusk sky
 
 constexpr int kAttrs = 8;  // u, v, nx, ny, nz, wx, wy, wz
 

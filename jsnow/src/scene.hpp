@@ -68,7 +68,7 @@ float terrainHeight(float x, float z);
 
 // Small: session-1 scene (100,000 triangles, one LOD).
 // Large: ~1,000,000 triangles at full detail, 3 LODs per object.
-Scene buildScene(ThreadPool& pool, SceneKind kind, int textureSize = 2048);
+Scene buildScene(ThreadPool& pool, SceneKind kind, int textureSize = 2048, int pointLights = 128);
 
 // Frustum test of every object, LOD selection by projected size, draw list out.
 // Returns the number of triangles submitted.

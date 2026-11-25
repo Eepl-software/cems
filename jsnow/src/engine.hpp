@@ -16,7 +16,7 @@ struct Options {
   bool reuse = false;    // reproject earlier frames with motion vectors
   bool shadows = true;   // sun cascaded shadow maps
   bool pointLights = true;
-  float exposure = 1.0f;
+  float exposure = 1.6f;
   int outW = 1920, outH = 1080;
   std::string name() const;
 };

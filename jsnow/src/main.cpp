@@ -111,7 +111,8 @@ void usage() {
       "  --fast          half resolution + reuse (best speed/quality trade-off)\n"
       "  --no-shadows    disable the sun's cascaded shadow maps\n"
       "  --no-lights     disable the point lights\n"
-      "  --exposure E    tone-mapping exposure (default 1)\n"
+      "  --lights N      number of point lights (default 128, max 255)\n"
+      "  --exposure E    tone-mapping exposure (default 1.6)\n"
       "  --scene S       large (default: 1M tris, 3 LODs) or small (100k, session 1)\n"
       "  --bench         run baseline, each trick, all tricks and fast; print a table\n"
       "  --bench-fast    benchmark baseline and --fast only\n"
@@ -129,7 +130,7 @@ void usage() {
 int main(int argc, char** argv) {
   Options o;
   bool bench = false, benchFast = false, quality = false;
-  int frames = 300, threads = int(std::thread::hardware_concurrency()), pngFrame = 150, texSize = 2048;
+  int frames = 300, threads = int(std::thread::hardware_concurrency()), pngFrame = 150, texSize = 2048, lights = 128;
   SceneKind kind = SceneKind::Large;
   std::string png = "jsnow.png";
   for (int i = 1; i < argc; ++i) {
@@ -151,6 +152,7 @@ int main(int argc, char** argv) {
     else if (a == "--quality") quality = true;
     else if (a == "--frames") frames = std::max(1, std::atoi(next().c_str()));
     else if (a == "--threads") threads = std::max(1, std::atoi(next().c_str()));
+    else if (a == "--lights") lights = std::max(0, std::min(255, std::atoi(next().c_str())));
     else if (a == "--tex") texSize = std::max(4, std::atoi(next().c_str()));
     else if (a == "--png") png = next();
     else if (a == "--png-frame") pngFrame = std::atoi(next().c_str());
@@ -170,12 +172,12 @@ int main(int argc, char** argv) {
   }
   ThreadPool pool(threads);
   auto t0 = std::chrono::steady_clock::now();
-  Scene scene = buildScene(pool, kind, texSize);
+  Scene scene = buildScene(pool, kind, texSize, lights);
   const double buildMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
   std::printf("JSNOW: scene %s: %zu tris full detail (%zu in all LODs), %zu vertices, %zu textures %dx%d, "
-              "built in %.0f ms\n       %dx%d, %d threads, %s, %d frames, shadows %s\n",
+              "%zu point lights, built in %.0f ms\n       %dx%d, %d threads, %s, %d frames, shadows %s\n",
               scene.description.c_str(), scene.fullDetailTriangles, scene.mesh.triangleCount(),
-              scene.mesh.vertexCount(), size_t(scene.textures.layers), texSize, texSize, buildMs, o.outW, o.outH,
+              scene.mesh.vertexCount(), size_t(scene.textures.layers), texSize, texSize, scene.lights.size(), buildMs, o.outW, o.outH,
               threads, simd::backendName(), frames, o.shadows ? "on" : "off");
 
   if (!bench) {

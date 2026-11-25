@@ -39,6 +39,8 @@ Tools installed in the session (needed again in a fresh container):
 | B5+B6 hw gather, shadow skip (shadow 2.1) | fast | 154 | 6.48 | 33.9 | 0.27 | 0.74 | 2.62 | 0.40 | – | 0.38 | raster 2.6, shadow 2.1 |
 | C1 deferred + PBR + HDR/ACES (shadow 4.3, post 0.84) | baseline | 47.4 | 21.08 | ref | 0.62 | 1.61 | 13.67 | – | – | – | raster+shade 13.7 |
 | C1 deferred + PBR + HDR/ACES (shadow 2.0, post 0.11) | fast | 156 | 6.40 | 32.6 | 0.25 | 0.68 | 2.60 | 0.37 | – | 0.35 | raster+shade 2.6, shadow 2.0 |
+| C2 128 point lights, tiled culling (shadow 4.3, post 0.84) | baseline | 43.1 | 23.18 | ref | 0.58 | 1.58 | 15.81 | – | – | – | raster+shade 15.8 (lights ≈ +2.2) |
+| C2 128 point lights (shadow 2.2, post 0.14) | fast | 130 | 7.71 | 33.0 | 0.32 | 0.84 | 3.36 | 0.42 | – | 0.41 | raster+shade 3.4, shadow 2.2 |
 
 ## Decisions log
 - A1: `--fast` = half resolution + reuse (best trade-off found in session 1).
@@ -80,6 +82,13 @@ Tools installed in the session (needed again in a fresh container):
   **Bug found & fixed in C1**: `Target` gained an `hdr[3]` member and the shadow pass's
   brace-initialiser silently put the shadow-map pointer into `hdr[1]` → shadows vanished.
   Bisect showed shadows worked through B7; now `Target` fields are assigned by name.
+- C2: 128 point lights (`--lights N`, max 255; `--no-lights`), coloured lamps 1.5-3 m above
+  the terrain, radius 9 m, inverse-square falloff with a smooth (1-(d/r)^4)^2 window, same
+  GGX BRDF as the sun. Tiled culling per 16x16 sub-tile: each light's conservative screen
+  rectangle (projected AABB corners, full screen if it crosses the near plane) and view-depth
+  range against the sub-tile's min/max depth; per-group loop over the sub-tile's list.
+  Lighting changed to dusk so the lamps are visible (sun 1.6/1.15/0.75, sky 0.10/0.14/0.26,
+  exposure 1.6). Lights cost ≈ 2.2 ms at 1080p on 4 cores.
 
 ## Phase B optimisation rounds
 | round | change | baseline ms before → after | gain | fast ms before → after | gain |
@@ -109,4 +118,4 @@ Quality pass now renders the reference every frame so its caches stay in step.
 - **Phase B stopped after B7**: B5, B6, B7 each gained <10% (stop rule). Phase B total:
   baseline 44.57 → 18.91 ms (2.36x), fast 13.38 → 6.48 ms (2.06x).
   Remaining profile (baseline): tile shading ~8 ms, visibility raster ~4.5 ms, shadow passes 4.4, setup 1.7.
-- Phase C: C2 100+ point lights with tiled culling (culling code already in place); C3 transparency; C4 bloom; C5 TAA.
+- Phase C: C3 transparency; C4 bloom; C5 TAA.
