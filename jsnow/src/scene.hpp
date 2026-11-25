@@ -30,6 +30,7 @@ struct Object {
   int lodCount = 1;
   LodRange lod[3];
   float lodEdge[3] = {0, 0, 0};  // typical triangle edge length (world units) per LOD
+  bool transparent = false;      // alpha-blended material (no shadow casting)
 };
 
 // Metallic-roughness PBR material. alpha < 1 = transparent (forward, blended).
@@ -79,7 +80,10 @@ struct CullStats {
 // LOD: the finest level whose projected edge is >= kLodTargetPx pixels at a
 // 1080-line reference (pixelsPerUnitAt1m = 1080 / (2 tan(fovy/2))).
 constexpr float kLodTargetPx = 5.0f;
+// Transparent objects go to *transparentOut, or are skipped when it is null
+// (shadow passes: transparent objects do not cast shadows).
 CullStats buildDrawList(const Scene& s, const Mat4& viewProj, Vec3 lodEye, float pixelsPerUnitAt1m,
-                        bool cullNear, int lodBias, std::vector<DrawItem>& out);
+                        bool cullNear, int lodBias, std::vector<DrawItem>& out,
+                        std::vector<DrawItem>* transparentOut = nullptr);
 
 }  // namespace jsnow

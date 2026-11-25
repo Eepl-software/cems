@@ -41,6 +41,8 @@ Tools installed in the session (needed again in a fresh container):
 | C1 deferred + PBR + HDR/ACES (shadow 2.0, post 0.11) | fast | 156 | 6.40 | 32.6 | 0.25 | 0.68 | 2.60 | 0.37 | – | 0.35 | raster+shade 2.6, shadow 2.0 |
 | C2 128 point lights, tiled culling (shadow 4.3, post 0.84) | baseline | 43.1 | 23.18 | ref | 0.58 | 1.58 | 15.81 | – | – | – | raster+shade 15.8 (lights ≈ +2.2) |
 | C2 128 point lights (shadow 2.2, post 0.14) | fast | 130 | 7.71 | 33.0 | 0.32 | 0.84 | 3.36 | 0.42 | – | 0.41 | raster+shade 3.4, shadow 2.2 |
+| C3 transparency (shadow 4.4, post 0.84) | baseline | 38.0 | 26.29 | ref | 0.63 | 1.73 | 18.68 | – | – | – | raster+shade 18.7 (water re-lit forward ≈ +3) |
+| C3 transparency (shadow 2.1, post 0.11) | fast | 130 | 7.70 | 32.7 | 0.30 | 0.80 | 3.65 | 0.40 | – | 0.37 | raster+shade 3.7 |
 
 ## Decisions log
 - A1: `--fast` = half resolution + reuse (best trade-off found in session 1).
@@ -89,6 +91,16 @@ Tools installed in the session (needed again in a fresh container):
   range against the sub-tile's min/max depth; per-group loop over the sub-tile's list.
   Lighting changed to dusk so the lamps are visible (sun 1.6/1.15/0.75, sky 0.10/0.14/0.26,
   exposure 1.6). Lights cost ≈ 2.2 ms at 1080p on 4 cores.
+- C3: transparency. Water plane at y = -3 (4x4 chunks, 8,192 tris, alpha 0.55, roughness
+  0.08) fills the valleys; 8 floating glass spheres (alpha 0.3, 3 LODs). Objects flagged
+  `transparent` go to a second draw list, set up into a second set of 64 chunks with their own
+  tile bins. Per tile, after opaque deferred lighting: transparent triangles sorted
+  back-to-front by depth at their bbox centre, depth-tested against opaque depth (no
+  write), forward-shaded with the same G-buffer resolve + PBR lighting (sun, shadows, tiled
+  point lights) and alpha-blended into the HDR tile. Limitations (logged): transparent
+  objects cast no shadows; per-triangle (not per-pixel) sorting; sub-tile light lists use
+  opaque depth bounds, so a light in front of all opaque surfaces of a sub-tile can miss
+  a glass sphere; reprojection uses opaque depth for transparent pixels. `--no-transparency`.
 
 ## Phase B optimisation rounds
 | round | change | baseline ms before → after | gain | fast ms before → after | gain |
@@ -118,4 +130,4 @@ Quality pass now renders the reference every frame so its caches stay in step.
 - **Phase B stopped after B7**: B5, B6, B7 each gained <10% (stop rule). Phase B total:
   baseline 44.57 → 18.91 ms (2.36x), fast 13.38 → 6.48 ms (2.06x).
   Remaining profile (baseline): tile shading ~8 ms, visibility raster ~4.5 ms, shadow passes 4.4, setup 1.7.
-- Phase C: C3 transparency; C4 bloom; C5 TAA.
+- Phase C: C4 bloom; C5 TAA (tone mapping done in C1).

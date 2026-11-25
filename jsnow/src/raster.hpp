@@ -90,7 +90,10 @@ struct TriAttr {
 class Rasterizer {
  public:
   Rasterizer(ThreadPool& pool, const Scene& scene);
-  void render(const PassParams& pp, const std::vector<DrawItem>& draws, const Target& t, StageTimes& times);
+  // transparent (optional): alpha-blended geometry, sorted back-to-front per
+  // tile and forward-shaded after the opaque deferred lighting.
+  void render(const PassParams& pp, const std::vector<DrawItem>& draws, const Target& t, StageTimes& times,
+              const std::vector<DrawItem>* transparent = nullptr);
   size_t lastBinnedTriangles() const { return binned_; }
 
  private:
@@ -104,7 +107,7 @@ class Rasterizer {
     std::vector<std::vector<uint32_t>> bins;
   };
   void vertexStage(const PassParams& pp);
-  void setupChunk(int c, const PassParams& pp, const std::vector<DrawItem>& draws);
+  void setupChunk(int c, const PassParams& pp, const std::vector<DrawItem>& draws, const std::vector<uint64_t>& prefix);
   void setupTri(Chunk& ch, const SV& a, const SV& b, const SV& c, uint32_t mat, bool shaded);
   void clipAndSetup(Chunk& ch, const uint32_t v[3], uint32_t mat, const PassParams& pp, bool shaded);
   void rasterTile(int tile, int tid, const Target& t, const PassParams& pp);
@@ -116,7 +119,8 @@ class Rasterizer {
   std::vector<float> cx_, cy_, cz_, cw_, sx_, sy_, sd_, iw_;
   std::vector<uint8_t> oc_;
   std::vector<std::pair<uint32_t, uint32_t>> vblocks_;  // vertex ranges this pass
-  std::vector<uint64_t> triPrefix_;                     // triangle prefix sum over draws
+  std::vector<uint64_t> triPrefix_, triPrefixT_;        // triangle prefix sums (opaque, transparent)
+  bool hasTransparent_ = false;
   std::vector<Chunk> chunks_;
   std::vector<int> tileOrder_;
   std::vector<uint32_t> tileCost_;
@@ -129,7 +133,7 @@ class Rasterizer {
   std::vector<TileBuf> tileBufs_;
   // Material table in SoA form for per-lane gathers while shading.
   std::vector<int32_t> matLayer_;
-  std::vector<float> matR_, matG_, matB_, matRough_, matMetal_;
+  std::vector<float> matR_, matG_, matB_, matRough_, matMetal_, matAlpha_;
   // Point lights for this pass: SoA + conservative screen rectangles.
   std::vector<float> lx_, ly_, lz_, lr_, lcr_, lcg_, lcb_, lviewW_;
   std::vector<int> lminx_, lminy_, lmaxx_, lmaxy_;

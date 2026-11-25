@@ -67,7 +67,8 @@ Engine::~Engine() = default;
 void Engine::renderScene(const Camera& cam, const Viewport& vp, int w, int h, std::vector<float>* hdr, float* depth,
                          uint32_t* ldr, StageTimes& st) {
   auto a = clk::now();
-  submitted_ = buildDrawList(scene_, cam.viewProj, cam.pos, lodPixelScale(cam), true, 0, draws_).triangles;
+  submitted_ = buildDrawList(scene_, cam.viewProj, cam.pos, lodPixelScale(cam), true, 0, draws_,
+                             o_.transparency ? &transparentDraws_ : nullptr).triangles;
   st.cull += ms(a, clk::now());
   if (shadows_) shadows_->update(cam, sunDirection(), st);
   PassParams pp;
@@ -80,7 +81,7 @@ void Engine::renderScene(const Camera& cam, const Viewport& vp, int w, int h, st
   pp.shadow = shadows_.get();
   pp.pointLights = o_.pointLights;
   Target t{w, h, {hdr[0].data(), hdr[1].data(), hdr[2].data()}, depth};
-  rast_.render(pp, draws_, t, st);
+  rast_.render(pp, draws_, t, st, &transparentDraws_);
   a = clk::now();
   const float* planes[3] = {hdr[0].data(), hdr[1].data(), hdr[2].data()};
   tonemap(pool_, w, h, planes, o_.exposure, ldr);

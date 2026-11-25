@@ -16,6 +16,7 @@ struct Options {
   bool reuse = false;    // reproject earlier frames with motion vectors
   bool shadows = true;   // sun cascaded shadow maps
   bool pointLights = true;
+  bool transparency = true;
   float exposure = 1.6f;
   int outW = 1920, outH = 1080;
   std::string name() const;
@@ -59,7 +60,7 @@ class Engine {
   std::vector<uint32_t> subColor_;
   std::vector<float> subDepth_;
   std::vector<uint32_t> out_;
-  std::vector<DrawItem> draws_;
+  std::vector<DrawItem> draws_, transparentDraws_;
   int hist_ = 0;
   size_t submitted_ = 0;
   Camera prevCam_;

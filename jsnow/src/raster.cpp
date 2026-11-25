@@ -39,7 +39,7 @@ Rasterizer::Rasterizer(ThreadPool& pool, const Scene& scene)
   const size_t n = mesh_.vertexCount();
   for (auto* v : {&cx_, &cy_, &cz_, &cw_, &sx_, &sy_, &sd_, &iw_}) v->resize(n);
   oc_.resize(n);
-  chunks_.resize(kChunks);
+  chunks_.resize(2 * kChunks);  // [0, kChunks) opaque, [kChunks, 2 kChunks) transparent
   tileBufs_.resize(pool.size());
 }
 
@@ -205,11 +205,13 @@ void Rasterizer::clipAndSetup(Chunk& ch, const uint32_t vi_[3], uint32_t mat, co
   for (int k = 1; k + 1 < n; ++k) setupTri(ch, sv[0], sv[k], sv[k + 1], mat, shaded);
 }
 
-void Rasterizer::setupChunk(int c, const PassParams& pp, const std::vector<DrawItem>& draws) {
-  Chunk& ch = chunks_[c];
+void Rasterizer::setupChunk(int cIndex, const PassParams& pp, const std::vector<DrawItem>& draws,
+                            const std::vector<uint64_t>& triPrefix_) {
+  Chunk& ch = chunks_[cIndex];
   ch.hdr.clear();
   ch.attr.clear();
   for (int t = 0; t < tilesX_ * tilesY_; ++t) ch.bins[t].clear();
+  const int c = cIndex % kChunks;
   const uint64_t T = triPrefix_.back();
   uint64_t g = T * c / kChunks;
   const uint64_t gEnd = T * (c + 1) / kChunks;
@@ -446,6 +448,34 @@ void drawTri(const TriHeader& t, uint32_t triId, float* depth, uint32_t* ids, in
 
 }  // namespace
 
+namespace {
+// Calls f(offset, x, y, mask) for every 8-px group of the tile where the
+// triangle covers pixels in front of the stored depth (no depth write).
+template <class F>
+void forEachCovered(const TriHeader& t, const float* depth, int tileX, int tileY, const F& f) {
+  const int x0 = std::max(t.minx, tileX), x1 = std::min(t.maxx, tileX + kTile - 1);
+  const int y0 = std::max(t.miny, tileY), y1 = std::min(t.maxy, tileY + kTile - 1);
+  if (x0 > x1 || y0 > y1) return;
+  const int cxs = x0 & ~7;
+  for (int y = y0; y <= y1; ++y) {
+    const float fy = float(y) + 0.5f - t.y0;
+    for (int cx = cxs; cx <= x1; cx += 8) {
+      const vf px = set1(float(cx) + 0.5f) + iotaf();
+      const vf fx = px - set1(t.x0);
+      const vf e0 = fma(set1(t.A[0]), fx, set1(t.B[0] * fy + t.C[0]));
+      const vf e1 = fma(set1(t.A[1]), fx, set1(t.B[1] * fy + t.C[1]));
+      const vf e2 = fma(set1(t.A[2]), fx, set1(t.B[2] * fy + t.C[2]));
+      const vm outside = signmask(as_f(as_i(e0) | as_i(e1) | as_i(e2)));
+      if (bits(outside) == 0xFF) continue;
+      const int o = (y - tileY) * kTile + (cx - tileX);
+      const vf z = fma(set1(t.pd[1]), fx, set1(t.pd[0] + t.pd[2] * fy));
+      const vm m = andnot(outside, z > load(depth + o));
+      if (bits(m)) f(o, px, set1(float(y) + 0.5f), m);
+    }
+  }
+}
+}  // namespace
+
 void Rasterizer::rasterTile(int tile, int tid, const Target& tg, const PassParams& pp) {
   TileBuf& tb = tileBufs_[tid];
   const bool shaded = pp.mode == PassMode::Shaded;
@@ -459,7 +489,7 @@ void Rasterizer::rasterTile(int tile, int tid, const Target& tg, const PassParam
   static thread_local std::vector<uint8_t> done;
   list.clear();
   listAttr.clear();
-  for (size_t c = 0; c < chunks_.size(); ++c) {
+  for (size_t c = 0; c < size_t(kChunks); ++c) {
     const Chunk& ch = chunks_[c];
     for (uint32_t id : ch.bins[tile]) {
       const TriHeader& h = ch.hdr[id];
@@ -527,6 +557,38 @@ void Rasterizer::rasterTile(int tile, int tid, const Target& tg, const PassParam
         store(tb.hdr[0] + o, r); store(tb.hdr[1] + o, g); store(tb.hdr[2] + o, b);
       }
     }
+    // ---- transparent geometry: back-to-front, forward shaded, alpha blended ----
+    if (hasTransparent_) {
+      struct TEntry { float key; const TriHeader* h; const TriAttr* pre; };
+      static thread_local std::vector<TEntry> tl;
+      tl.clear();
+      for (int c = kChunks; c < 2 * kChunks; ++c)
+        for (uint32_t id : chunks_[c].bins[tile]) {
+          const TriHeader& t = chunks_[c].hdr[id];
+          const float cx = 0.5f * (t.minx + t.maxx) + 0.5f - t.x0, cy = 0.5f * (t.miny + t.maxy) + 0.5f - t.y0;
+          tl.push_back({t.pd[0] + t.pd[1] * cx + t.pd[2] * cy, &t,  // reversed depth: small = far
+                        t.attrIdx >= 0 ? &chunks_[c].attr[t.attrIdx] : nullptr});
+        }
+      std::sort(tl.begin(), tl.end(), [](const TEntry& a, const TEntry& b) { return a.key < b.key; });
+      TriAttr ta;
+      for (const TEntry& e : tl) {
+        const TriHeader& t = *e.h;
+        if (e.pre) ta = *e.pre; else buildAttr(t, ta);
+        const float alpha = matAlpha_[t.material];
+        auto single = [&](uint32_t) -> const TriAttr& { return ta; };
+        forEachCovered(t, tb.depth, tileX, tileY, [&](int o, vf x, vf y, vm m) {
+          const GBuf gb = resolveGroup(selecti(m, set1i(0), set1i(-1)), x, y, s, single);
+          const int sub = ((o / kTile) / kSub) * kSubs + (o % kTile) / kSub;
+          vf r, g, b;
+          lightGroup(gb, s, subList[sub], subCount[sub], r, g, b);
+          const vf a = maskf(m, set1(alpha));
+          float* hr = tb.hdr[0] + o; float* hg = tb.hdr[1] + o; float* hb = tb.hdr[2] + o;
+          store(hr, fma(a, r - load(hr), load(hr)));
+          store(hg, fma(a, g - load(hg), load(hg)));
+          store(hb, fma(a, b - load(hb), load(hb)));
+        });
+      }
+    }
   }
   for (int y = 0; y < h; ++y) {
     if (tg.hdr[0])
@@ -572,7 +634,7 @@ void Rasterizer::prepareLights(const PassParams& pp, int w, int h) {
 }
 
 void Rasterizer::render(const PassParams& pp, const std::vector<DrawItem>& draws, const Target& tg,
-                        StageTimes& times) {
+                        StageTimes& times, const std::vector<DrawItem>* transparent) {
   using clk = std::chrono::steady_clock;
   auto ms = [](clk::time_point a, clk::time_point b) {
     return std::chrono::duration<double, std::milli>(b - a).count();
@@ -589,33 +651,46 @@ void Rasterizer::render(const PassParams& pp, const std::vector<DrawItem>& draws
       matR_.push_back(m.tint[0]); matG_.push_back(m.tint[1]); matB_.push_back(m.tint[2]);
       matRough_.push_back(m.roughness);
       matMetal_.push_back(m.metallic);
+      matAlpha_.push_back(m.alpha);
     }
   }
   if (pp.mode == PassMode::Shaded) prepareLights(pp, tg.w, tg.h);
   vblocks_.clear();
   triPrefix_.assign(1, 0);
-  for (const DrawItem& d : draws) {
-    for (uint32_t v = 0; v < d.r.vertexCount; v += kVertexBlock)
-      vblocks_.push_back({d.r.firstVertex + v, d.r.firstVertex + std::min(d.r.vertexCount, v + kVertexBlock)});
-    triPrefix_.push_back(triPrefix_.back() + d.r.indexCount / 3);
-  }
+  triPrefixT_.assign(1, 0);
+  hasTransparent_ = transparent && !transparent->empty() && pp.mode == PassMode::Shaded;
+  auto addDraws = [&](const std::vector<DrawItem>& list, std::vector<uint64_t>& prefix) {
+    for (const DrawItem& d : list) {
+      for (uint32_t v = 0; v < d.r.vertexCount; v += kVertexBlock)
+        vblocks_.push_back({d.r.firstVertex + v, d.r.firstVertex + std::min(d.r.vertexCount, v + kVertexBlock)});
+      prefix.push_back(prefix.back() + d.r.indexCount / 3);
+    }
+  };
+  addDraws(draws, triPrefix_);
+  if (hasTransparent_) addDraws(*transparent, triPrefixT_);
   auto t0 = clk::now();
   vertexStage(pp);
   auto t1 = clk::now();
-  pool_.run(kChunks, [&](int c, int) { setupChunk(c, pp, draws); });
+  if (hasTransparent_)
+    pool_.run(2 * kChunks, [&](int c, int) {
+      if (c < kChunks) setupChunk(c, pp, draws, triPrefix_);
+      else setupChunk(c, pp, *transparent, triPrefixT_);
+    });
+  else
+    pool_.run(kChunks, [&](int c, int) { setupChunk(c, pp, draws, triPrefix_); });
   auto t2 = clk::now();
   // Largest tiles first: shortens the tail where some threads idle at the end.
   const int nt = tilesX_ * tilesY_;
   tileOrder_.resize(nt);
   tileCost_.assign(nt, 0);
-  for (const Chunk& c : chunks_)
-    for (int t = 0; t < nt; ++t) tileCost_[t] += uint32_t(c.bins[t].size());
+  for (int c = 0; c < (hasTransparent_ ? 2 : 1) * kChunks; ++c)
+    for (int t = 0; t < nt; ++t) tileCost_[t] += uint32_t(chunks_[c].bins[t].size());
   for (int t = 0; t < nt; ++t) tileOrder_[t] = t;
   std::sort(tileOrder_.begin(), tileOrder_.end(), [&](int a, int b) { return tileCost_[a] > tileCost_[b]; });
   pool_.run(nt, [&](int i, int tid) { rasterTile(tileOrder_[i], tid, tg, pp); });
   auto t3 = clk::now();
   binned_ = 0;
-  for (auto& c : chunks_) binned_ += c.hdr.size();
+  for (int c = 0; c < (hasTransparent_ ? 2 : 1) * kChunks; ++c) binned_ += chunks_[c].hdr.size();
   times.vertex += ms(t0, t1);
   times.setup += ms(t1, t2);
   times.raster += ms(t2, t3);

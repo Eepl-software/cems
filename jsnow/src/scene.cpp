@@ -276,6 +276,69 @@ Scene buildScene(ThreadPool& pool, SceneKind kind, int texSize, int pointLights)
     }
     s.objects.push_back(o);
   }
+  // ---- transparency: water in the valleys + floating glass spheres ----
+  {
+    Material water;
+    water.texture = 2;
+    water.tint[0] = 0.10f; water.tint[1] = 0.32f; water.tint[2] = 0.42f;
+    water.roughness = 0.08f;
+    water.alpha = 0.55f;
+    const uint16_t wid = uint16_t(s.materials.size());
+    s.materials.push_back(water);
+    const float level = -3.0f;
+    const int C = 4, Q = 16;
+    const float cs = 2 * kTerrainHalf / C;
+    for (int cz = 0; cz < C; ++cz)
+      for (int cx = 0; cx < C; ++cx) {
+        RangeBuilder rb(m);
+        const float x0 = -kTerrainHalf + cx * cs, z0 = -kTerrainHalf + cz * cs;
+        const uint32_t base = uint32_t(m.px.size());
+        for (int j = 0; j <= Q; ++j)
+          for (int i = 0; i <= Q; ++i) {
+            const float x = x0 + cs * i / Q, z = z0 + cs * j / Q;
+            addVertex(m, {x, level, z}, {0, 1, 0}, x * 0.05f, z * 0.05f);
+          }
+        for (int j = 0; j < Q; ++j)
+          for (int i = 0; i < Q; ++i) {
+            const uint32_t v00 = base + j * (Q + 1) + i, v10 = v00 + 1, v01 = v00 + Q + 1, v11 = v01 + 1;
+            addTri(m, v00, v01, v10, wid);
+            addTri(m, v10, v01, v11, wid);
+          }
+        Object o;
+        o.center = {x0 + cs / 2, level, z0 + cs / 2};
+        o.radius = cs * 0.75f;
+        o.lod[0] = rb.done();
+        o.transparent = true;
+        s.objects.push_back(o);
+      }
+    std::mt19937 glassRng(99);
+    for (int i = 0; i < 8; ++i) {
+      Material glass;
+      glass.texture = 2;
+      glass.tint[0] = 0.75f; glass.tint[1] = 0.85f; glass.tint[2] = 1.0f;
+      glass.roughness = 0.05f;
+      glass.alpha = 0.3f;
+      const uint16_t gid = uint16_t(s.materials.size());
+      s.materials.push_back(glass);
+      const float x = (U(glassRng) * 2 - 1) * 45.0f, z = (U(glassRng) * 2 - 1) * 45.0f, r = 3.0f;
+      const Vec3 c{x, terrainHeight(x, z) + 5.0f, z};
+      Object o;
+      o.center = c;
+      o.radius = r;
+      o.transparent = true;
+      if (!large) {
+        o.lod[0] = addSphere(m, c, r, 11, 20, gid);
+      } else {
+        o.lodCount = 3;
+        o.lod[0] = addSphere(m, c, r, 24, 48, gid);
+        o.lod[1] = addSphere(m, c, r, 12, 24, gid);
+        o.lod[2] = addSphere(m, c, r, 6, 12, gid);
+        for (int l = 0; l < 3; ++l) o.lodEdge[l] = 6.283f * r / (48 >> l);
+      }
+      s.objects.push_back(o);
+    }
+  }
+
   // Point lights: coloured lamps hovering 1.5-3 m above the terrain.
   std::mt19937 lightRng(4242);
   for (int i = 0; i < pointLights; ++i) {
@@ -296,8 +359,9 @@ Scene buildScene(ThreadPool& pool, SceneKind kind, int texSize, int pointLights)
 }
 
 CullStats buildDrawList(const Scene& s, const Mat4& M, Vec3 eye, float pxPerUnit, bool cullNear, int lodBias,
-                        std::vector<DrawItem>& out) {
+                        std::vector<DrawItem>& out, std::vector<DrawItem>* transparentOut) {
   out.clear();
+  if (transparentOut) transparentOut->clear();
   // Clip-space half-spaces as world planes (Gribb-Hartmann): row3 +- row0/1.
   float planes[5][4];
   int np = 0;
@@ -317,6 +381,7 @@ CullStats buildDrawList(const Scene& s, const Mat4& M, Vec3 eye, float pxPerUnit
   }
   CullStats st;
   for (const Object& o : s.objects) {
+    if (o.transparent && !transparentOut) continue;
     bool visible = true;
     for (int p = 0; p < np && visible; ++p)
       visible = planes[p][0] * o.center.x + planes[p][1] * o.center.y + planes[p][2] * o.center.z + planes[p][3] >= -o.radius;
@@ -327,7 +392,7 @@ CullStats buildDrawList(const Scene& s, const Mat4& M, Vec3 eye, float pxPerUnit
     int lod = 0;
     while (lod + 1 < o.lodCount && o.lodEdge[lod] * pxPerUnit / d < kLodTargetPx) ++lod;
     lod = std::clamp(lod + lodBias, 0, o.lodCount - 1);
-    out.push_back({o.lod[lod]});
+    (o.transparent ? *transparentOut : out).push_back({o.lod[lod]});
     ++st.objectsVisible;
     st.triangles += o.lod[lod].indexCount / 3;
   }
